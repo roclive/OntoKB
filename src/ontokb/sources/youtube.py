@@ -18,23 +18,37 @@ def _vid(url: str) -> str:
 
 
 def items_from_takeout_csv(path: str | Path) -> list[ContentItem]:
-    """Parse a Google Takeout 'Watch later' playlist CSV.
+    """Parse a YouTube watch-later video list.
 
-    Takeout format: header rows describing the playlist, then a table whose
-    first column is the video ID (column name varies by export locale), so we
-    fall back to positional parsing.
+    Accepts two shapes in the same reader, since both are common in practice:
+    - Real Google Takeout export: header rows + a table whose first column is
+      an 11-char video ID (column name varies by export locale).
+    - A plain list of one YouTube URL per line (e.g. hand-collected or
+      exported by a browser extension) — every cell is scanned for a
+      recognizable video ID.
+    Deduplicates by video ID; skips cells that match neither shape.
     """
     items: list[ContentItem] = []
+    seen: set[str] = set()
     with open(path, newline="", encoding="utf-8-sig") as f:
         for row in csv.reader(f):
-            if not row:
-                continue
-            candidate = row[0].strip()
-            if re.fullmatch(r"[\w-]{11}", candidate):
-                url = f"https://www.youtube.com/watch?v={candidate}"
-                items.append(ContentItem(
-                    id=f"yt:{candidate}", kind="video", source="youtube", url=url,
-                ))
+            for cell in row:
+                cell = cell.strip()
+                if not cell:
+                    continue
+                vid = None
+                if re.fullmatch(r"[\w-]{11}", cell):
+                    vid = cell
+                elif "youtube.com" in cell or "youtu.be" in cell:
+                    m = re.search(r"(?:v=|youtu\.be/)([\w-]{11})", cell)
+                    if m:
+                        vid = m.group(1)
+                if vid and vid not in seen:
+                    seen.add(vid)
+                    items.append(ContentItem(
+                        id=f"yt:{vid}", kind="video", source="youtube",
+                        url=f"https://www.youtube.com/watch?v={vid}",
+                    ))
     return items
 
 

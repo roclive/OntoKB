@@ -11,9 +11,15 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 from .models import ContentItem
-from .pipeline import Pipeline
+from .pipeline import ROOT, Pipeline
+
+
+def _resolve(path: str) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else ROOT / p
 
 
 def _make_item(url: str) -> ContentItem:
@@ -56,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         if yt.get("takeout_csv"):
             from .sources.youtube import items_from_takeout_csv
 
-            items += items_from_takeout_csv(yt["takeout_csv"])
+            items += items_from_takeout_csv(_resolve(yt["takeout_csv"]))
         if yt.get("playlist_url"):
             from .sources.youtube import items_from_playlist
 

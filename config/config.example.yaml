@@ -15,7 +15,7 @@ sources:
     cookies_file: null          # optional, for age/region gated videos
     max_video_minutes: 30
   netease:
-    urls: []                    # explicit article URLs to ingest
+    urls: [https://www.163.com/dy/article/L1BS26LV051188EA.html]                    # explicit article URLs to ingest
     keywords: []                # reserved for column crawling (M1)
 
 llm:
