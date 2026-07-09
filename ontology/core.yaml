@@ -1,0 +1,77 @@
+# Core ontology for the watch-later research knowledge base.
+# LLM extraction output must validate against this schema before entering the graph.
+version: 1
+
+classes:
+  Thing: {}
+  Content:
+    parent: Thing
+    properties: [title, url, source, published_at, kind]   # kind: video | article
+  Person:
+    parent: Thing
+    properties: [role]
+  Organization:
+    parent: Thing
+    properties: [industry]
+  Technology:
+    parent: Thing
+    properties: [category, maturity]
+  Product:
+    parent: Thing
+    properties: [vendor]
+  Topic:
+    parent: Thing
+    properties: []
+  Event:
+    parent: Thing
+    properties: [date, location]
+  Claim:
+    parent: Thing
+    properties: [statement, stance]
+
+relations:
+  mentions:
+    domain: Content
+    range: Thing
+  about:
+    domain: Content
+    range: Topic
+  authoredBy:
+    domain: Content
+    range: Person
+  publishedBy:
+    domain: Content
+    range: Organization
+  worksAt:
+    domain: Person
+    range: Organization
+  develops:
+    domain: Organization
+    range: Technology
+  makes:
+    domain: Organization
+    range: Product
+  uses:
+    domain: Product
+    range: Technology
+  competesWith:
+    domain: Organization
+    range: Organization
+    symmetric: true
+  relatedTo:
+    domain: Thing
+    range: Thing
+    symmetric: true
+  participatesIn:
+    domain: Thing
+    range: Event
+  makesClaim:
+    domain: Content
+    range: Claim
+  supports:
+    domain: Claim
+    range: Claim
+  contradicts:
+    domain: Claim
+    range: Claim
+    symmetric: true

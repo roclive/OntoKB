@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+data/*.db
+data/audio/
+.pytest_cache/
+.env
+config/config.yaml
+vault/.obsidian/workspace*

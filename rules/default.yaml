@@ -1,0 +1,60 @@
+# Rule engine rules: forward-chaining over facts derived from the knowledge graph.
+# Facts are dicts. The FIRST pattern in `when.all` is the trigger and binds "$field"
+# variables for the actions; remaining patterns are existence guards.
+# Operators inside a field: {gte: N}, {lte: N}, {eq: X}, {in: [..]}, {contains: X}.
+# Each action also asserts a derived fact {kind: action, action: <name>, ...params}
+# so rules can chain on the results of other rules.
+max_iterations: 10
+
+rules:
+  - name: hot-topic-wiki
+    comment: A Topic mentioned by 5+ contents gets its own wiki page.
+    when:
+      all:
+        - kind: entity
+          type: Topic
+          degree: {gte: 5}
+    then:
+      - action: create_wiki_page
+        with: {entity: "$name"}
+
+  - name: wiki-into-report
+    comment: Any topic promoted to wiki also goes into the next research report.
+    when:
+      all:
+        - kind: action
+          action: create_wiki_page
+    then:
+      - action: queue_report
+        with: {topic: "$entity"}
+
+  - name: interest-report
+    comment: Content highly relevant to a configured interest goes straight to the report queue.
+    when:
+      all:
+        - kind: content
+          relevance: {gte: 0.7}
+    then:
+      - action: queue_report
+        with: {content_id: "$id", topic: "$top_topic"}
+
+  - name: contested-claims
+    comment: Contradicting claims are flagged as a controversy for the report.
+    when:
+      all:
+        - kind: triple
+          predicate: contradicts
+    then:
+      - action: flag_controversy
+        with: {subject: "$subject", object: "$object"}
+
+  - name: prolific-org-moc
+    comment: An Organization with many connections gets a Map-of-Content page.
+    when:
+      all:
+        - kind: entity
+          type: Organization
+          degree: {gte: 8}
+    then:
+      - action: create_moc
+        with: {entity: "$name"}
