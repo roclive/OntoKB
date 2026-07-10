@@ -4,6 +4,8 @@
   ontokb ingest <url>             # fetch + process one URL end to end
   ontokb rules                    # run the rule engine over the graph
   ontokb status                   # counts
+  ontokb visualize                # regenerate the interactive graph HTML in the vault
+  ontokb api                      # serve the graph query JSON API
 """
 
 from __future__ import annotations
@@ -42,8 +44,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status")
     sub.add_parser("rules")
     sub.add_parser("queue")
+    p_api = sub.add_parser("api")
+    p_api.add_argument("--host", default="127.0.0.1")
+    p_api.add_argument("--port", type=int, default=8765)
+    p_api.add_argument("--db", default=None, help="SQLite graph db path (default: paths.db)")
     p_ingest = sub.add_parser("ingest")
     p_ingest.add_argument("url")
+    p_vis = sub.add_parser("visualize")
+    p_vis.add_argument("-o", "--out", default=None,
+                       help="output HTML path (default: paths.graph_html or <vault>/Knowledge Graph.html)")
 
     args = parser.parse_args(argv)
     pipe = Pipeline()
@@ -76,6 +85,16 @@ def main(argv: list[str] | None = None) -> int:
         item = _make_item(args.url)
         stats = pipe.ingest(item)
         print(stats)
+    elif args.cmd == "visualize":
+        path = pipe.export_graph_html(args.out)
+        print(f"wrote {path}")
+    elif args.cmd == "api":
+        from .api import run_api
+
+        paths = pipe.config.get("paths", {})
+        db_path = _resolve(args.db or paths.get("db", "data/kb.db"))
+        print(f"serving graph API on http://{args.host}:{args.port} using {db_path}", flush=True)
+        run_api(db_path, host=args.host, port=args.port)
     return 0
 
 

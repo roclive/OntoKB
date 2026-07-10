@@ -45,8 +45,17 @@ class Pipeline:
         if item.source == "youtube":
             from .sources.youtube import fetch_transcript
 
-            cookies = (self.config.get("sources", {}).get("youtube", {}) or {}).get("cookies_file")
-            item.raw_text = fetch_transcript(item, cookies_file=cookies)
+            yt = self.config.get("sources", {}).get("youtube", {}) or {}
+            paths = self.config.get("paths", {})
+            item.raw_text = fetch_transcript(
+                item,
+                cookies_file=yt.get("cookies_file"),
+                whisper_model=yt.get("whisper_model", "small"),
+                whisper_language=yt.get("whisper_language"),
+                whisper_device=yt.get("whisper_device", "cpu"),
+                whisper_compute_type=yt.get("whisper_compute_type", "int8"),
+                cache_dir=ROOT / paths.get("transcripts", "data/transcripts") / "youtube",
+            )
         elif item.source == "netease":
             from .sources.netease import fetch_article
 
@@ -61,8 +70,16 @@ class Pipeline:
         """Process one content item end to end. Returns a small stats dict."""
         if not item.raw_text:
             self.fetch(item)
-        processed = process_content(item, self.ontology,
-                                    self.config.get("interests", []), client=client)
+        llm = self.config.get("llm", {}) or {}
+        processed = process_content(
+            item,
+            self.ontology,
+            self.config.get("interests", []),
+            client=client,
+            provider=llm.get("provider"),
+            model=llm.get("model"),
+            fallback_model=llm.get("fallback_model"),
+        )
 
         entity_types = {e.name: e.type for e in processed.entities}
         accepted, rejected = 0, 0
@@ -100,6 +117,18 @@ class Pipeline:
         for action in actions:
             self.vault.apply_action(self.graph, action)
         return actions
+
+    # -- visualization -------------------------------------------------------
+
+    def export_graph_html(self, out: str | Path | None = None) -> Path:
+        from .visualize import export_html
+
+        paths = self.config.get("paths", {})
+        target = Path(out or paths.get("graph_html")
+                      or Path(paths.get("vault", "vault")) / "Knowledge Graph.html")
+        if not target.is_absolute():
+            target = ROOT / target
+        return export_html(self.graph, target)
 
     def status(self) -> dict:
         c = self.graph.conn

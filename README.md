@@ -10,7 +10,7 @@
 watch list / URLs ──► sources/ (yt-dlp 字幕 · 163 正文抽取)
                           │ raw_text
                           ▼
-                      llm.py (claude-fable-5, structured output)
+                      llm.py (OpenAI/ChatGPT structured output)
                           │ summary · key_points · relevance · entities · triples
                           ▼
         ontology/core.yaml ──校验──► graph.py (SQLite 三元组库, 别名归并)
@@ -27,15 +27,54 @@ watch list / URLs ──► sources/ (yt-dlp 字幕 · 163 正文抽取)
 ```bash
 pip install -e ".[dev,llm,youtube,html]"
 cp config/config.example.yaml config/config.yaml   # 填 interests 和数据源
-pytest                                             # 19 个单测,无网络依赖
+pytest                                             # 30 个单测,无网络依赖
 
 ontokb ingest "https://www.youtube.com/watch?v=..."   # 单条端到端
 ontokb queue                                          # 批量入队
 ontokb rules                                          # 跑规则引擎
 ontokb status
+ontokb visualize                                      # 重新生成 vault/Knowledge Graph.html 交互图谱
+ontokb api                                            # 启动 SQLite graph 查询 API
 ```
 
-需要 `ANTHROPIC_API_KEY`(或 `ant auth login`)。模型默认 `claude-fable-5`,可用 `ONTOKB_MODEL` 覆盖。
+默认使用 OpenAI/ChatGPT,需要 `OPENAI_API_KEY`。模型默认 `gpt-5.5`,可用 `ONTOKB_MODEL` 覆盖。
+YouTube 字幕或本地 Whisper 转写会缓存到 `data/transcripts/youtube/`,后续同一视频优先复用缓存。
+
+## Graph 查询 API
+
+项目内置一个轻量 HTTP API,直接复用 `graph.py` 的 SQLite 三元组库和别名解析逻辑。Obsidian 当前只消费生成的 Markdown 和 `Knowledge Graph.html`,不提供这里需要的三元组查询接口。
+
+```bash
+ontokb api --host 127.0.0.1 --port 8765
+```
+
+查询实体及其一跳关系:
+
+```bash
+curl "http://127.0.0.1:8765/api/graph/query?q=harness%20agent&mode=phrase&expand=1"
+```
+
+如果需要类似终端表格的输出:
+
+```bash
+curl "http://127.0.0.1:8765/api/graph/query?q=harness%20agent&mode=phrase&expand=1&format=table"
+```
+
+返回文本示例:
+
+```text
+相关关系如下：
+triple_id	关系
+72	Codex -- uses -> harness agent
+```
+
+可用接口:
+
+- `GET /health`
+- `GET /api/entities/search?q=<关键词>&mode=terms|phrase&expand=0|1&limit=50`
+- `GET /api/graph/query?q=<关键词>&mode=terms|phrase&expand=0|1&limit=50&format=json|table`
+
+`mode=phrase&expand=1` 会先匹配完整短语,再用短语里的词扩展命中节点;`expand=0` 是严格短语匹配。
 
 ## 里程碑(双模型对比用)
 

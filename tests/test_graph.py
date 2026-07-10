@@ -67,3 +67,104 @@ def test_facts_projection(graph, onto):
     content = next(f for f in facts if f["kind"] == "content")
     assert content["relevance"] == 0.9
     assert content["top_topic"] == "AI agents"
+
+
+def test_related_graph_returns_harness_agent_relations(graph):
+    content_id = "yt:VwL82lejnrw"
+    ids = {}
+    for entity in [
+            ExtractedEntity(
+                name="Palantir CEO破防怒骂OpenAI和Anthropic，他真正怕的是什么？",
+                type="Content",
+            ),
+            ExtractedEntity(name="Codex", type="Product"),
+            ExtractedEntity(name="Claude Code", type="Product"),
+            ExtractedEntity(name="harness agent", type="Technology", aliases=["代理脚手架", "agent工具链"]),
+            ExtractedEntity(name="AI agent 工具链", type="Topic", aliases=["agent工具链", "harness agent"]),
+            ExtractedEntity(name="模型公司用agent工具链抢Palantir核心价值", type="Claim"),
+            ExtractedEntity(name="Palantir的结果生意被token模式打破", type="Claim"),
+        ]:
+        ids[entity.name] = graph.upsert_entity(entity)
+    graph.upsert_content(
+        content_id,
+        "video",
+        "youtube",
+        "https://www.youtube.com/watch?v=VwL82lejnrw",
+        "Palantir CEO破防怒骂OpenAI和Anthropic，他真正怕的是什么？",
+        status="processed",
+    )
+    triples = [
+        ("Palantir CEO破防怒骂OpenAI和Anthropic，他真正怕的是什么？", "about", "AI agent 工具链"),
+        ("Codex", "uses", "harness agent"),
+        ("Claude Code", "uses", "harness agent"),
+        (
+            "Palantir CEO破防怒骂OpenAI和Anthropic，他真正怕的是什么？",
+            "makesClaim",
+            "模型公司用agent工具链抢Palantir核心价值",
+        ),
+        (
+            "模型公司用agent工具链抢Palantir核心价值",
+            "supports",
+            "Palantir的结果生意被token模式打破",
+        ),
+    ]
+    for subject, predicate, obj in triples:
+        graph.conn.execute(
+            "INSERT INTO triples (subject_id, predicate, object_id, source) VALUES (?,?,?,?)",
+            (ids[subject], predicate, ids[obj], content_id),
+        )
+    graph.conn.commit()
+
+    result = graph.related_graph("harness agent")
+
+    assert [row["relation"] for row in result["relations"]] == [
+        "Palantir CEO破防怒骂OpenAI和Anthropic，他真正怕的是什么？ -- about -> AI agent 工具链",
+        "Codex -- uses -> harness agent",
+        "Claude Code -- uses -> harness agent",
+        "Palantir CEO破防怒骂OpenAI和Anthropic，他真正怕的是什么？ -- makesClaim -> 模型公司用agent工具链抢Palantir核心价值",
+        "模型公司用agent工具链抢Palantir核心价值 -- supports -> Palantir的结果生意被token模式打破",
+    ]
+    assert {entity["name"] for entity in result["matched_entities"]} == {
+        "AI agent 工具链",
+        "harness agent",
+        "模型公司用agent工具链抢Palantir核心价值",
+    }
+    assert result["sources"][0]["id"] == content_id
+
+    expanded_phrase = graph.related_graph("harness agent", mode="phrase")
+    assert [row["relation"] for row in expanded_phrase["relations"]] == [
+        "Palantir CEO破防怒骂OpenAI和Anthropic，他真正怕的是什么？ -- about -> AI agent 工具链",
+        "Codex -- uses -> harness agent",
+        "Claude Code -- uses -> harness agent",
+        "Palantir CEO破防怒骂OpenAI和Anthropic，他真正怕的是什么？ -- makesClaim -> 模型公司用agent工具链抢Palantir核心价值",
+        "模型公司用agent工具链抢Palantir核心价值 -- supports -> Palantir的结果生意被token模式打破",
+    ]
+
+    strict_phrase = graph.related_graph("harness agent", mode="phrase", expand=False)
+    assert [row["relation"] for row in strict_phrase["relations"]] == [
+        "Palantir CEO破防怒骂OpenAI和Anthropic，他真正怕的是什么？ -- about -> AI agent 工具链",
+        "Codex -- uses -> harness agent",
+        "Claude Code -- uses -> harness agent",
+    ]
+
+
+def test_search_expands_simplified_traditional_variants(graph):
+    person_id = graph.upsert_entity(
+        ExtractedEntity(name="達里奧・阿莫迪", type="Person", aliases=["Dario Amodei", "達里奧"])
+    )
+    org_id = graph.upsert_entity(ExtractedEntity(name="Anthropic", type="Organization"))
+    graph.conn.execute(
+        "INSERT INTO triples (subject_id, predicate, object_id, source) VALUES (?,?,?,?)",
+        (person_id, "worksAt", org_id, "test"),
+    )
+    graph.conn.commit()
+
+    result = graph.related_graph("达里奥", mode="phrase")
+
+    assert [entity["name"] for entity in result["matched_entities"]] == ["達里奧・阿莫迪"]
+    assert result["relations"] == [
+        {
+            "triple_id": 1,
+            "relation": "達里奧・阿莫迪 -- worksAt -> Anthropic",
+        }
+    ]

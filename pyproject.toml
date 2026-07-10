@@ -14,8 +14,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-llm = ["anthropic>=0.116.0"]
-youtube = ["yt-dlp>=2024.1.1"]
+llm = ["openai>=2.40.0", "anthropic>=0.116.0"]
+youtube = ["yt-dlp>=2024.1.1", "faster-whisper>=1.1.0"]
 html = ["beautifulsoup4>=4.12"]
 dev = ["pytest>=7.4"]
 

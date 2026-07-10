@@ -26,6 +26,7 @@ def test_inheritance(onto):
 def test_valid_triple(onto):
     onto.validate_triple("Content", "mentions", "Technology")  # range is Thing
     onto.validate_triple("Organization", "develops", "Technology")
+    onto.validate_triple("Person", "doesNotParticipateIn", "Event")
 
 
 def test_invalid_predicate(onto):

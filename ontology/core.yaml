@@ -65,6 +65,9 @@ relations:
   participatesIn:
     domain: Thing
     range: Event
+  doesNotParticipateIn:
+    domain: Thing
+    range: Event
   makesClaim:
     domain: Content
     range: Claim
