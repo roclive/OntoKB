@@ -29,7 +29,11 @@ def test_fetch_transcript_falls_back_to_whisper(monkeypatch, tmp_path):
             }
 
     monkeypatch.setitem(sys.modules, "yt_dlp", SimpleNamespace(YoutubeDL=FakeYDL))
-    monkeypatch.setattr(youtube, "_transcribe_with_whisper", lambda item, **kwargs: "local text")
+    def fake_transcribe(item, **kwargs):
+        assert kwargs["language"] == "zh"
+        return "local text"
+
+    monkeypatch.setattr(youtube, "_transcribe_with_whisper", fake_transcribe)
 
     item = ContentItem(
         id="yt:CETs0u10aSc",

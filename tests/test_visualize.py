@@ -38,6 +38,21 @@ def test_render_html_embeds_data_and_escapes_script_close():
     assert "Anthropic" in html
     assert "Claude</script>" not in html  # must be <-escaped
     assert "Claude\\u003c/script>" in html
+    assert 'id="chat-form"' in html
+    assert "fetch(apiUrl('/api/chat'" in html
+    assert "health.chat !== true" in html
+    assert "function renderMarkdown(container, markdown)" in html
+    assert "if(role === 'assistant') renderMarkdown(content, body)" in html
+    assert "element.rel = 'noopener noreferrer'" in html
+    assert 'id="workspace-resizer"' in html
+    assert "localStorage.setItem('graphPanelWidth'" in html
+    assert "new ResizeObserver" in html
+    assert 'id="chat-mode"' in html
+    assert 'id="chat-expand"' in html
+    assert 'id="chat-top"' in html
+    assert 'id="query-top"' in html
+    assert "mode: chatMode.value" in html
+    assert "expand: chatExpand.checked" in html
 
 
 def test_export_html_writes_file(tmp_path):

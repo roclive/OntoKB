@@ -3,6 +3,7 @@
   ontokb queue                    # load watch list / configured URLs into the queue
   ontokb ingest <url>             # fetch + process one URL end to end
   ontokb rules                    # run the rule engine over the graph
+  ontokb backfill                 # rebuild the document tier for pre-refactor data
   ontokb status                   # counts
   ontokb visualize                # regenerate the interactive graph HTML in the vault
   ontokb api                      # serve the graph query JSON API
@@ -44,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status")
     sub.add_parser("rules")
     sub.add_parser("queue")
+    sub.add_parser("backfill")
     p_api = sub.add_parser("api")
     p_api.add_argument("--host", default="127.0.0.1")
     p_api.add_argument("--port", type=int, default=8765)
@@ -85,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         item = _make_item(args.url)
         stats = pipe.ingest(item)
         print(stats)
+    elif args.cmd == "backfill":
+        print(pipe.backfill_documents())
     elif args.cmd == "visualize":
         path = pipe.export_graph_html(args.out)
         print(f"wrote {path}")
@@ -92,9 +96,17 @@ def main(argv: list[str] | None = None) -> int:
         from .api import run_api
 
         paths = pipe.config.get("paths", {})
+        llm = pipe.config.get("llm", {}) or {}
         db_path = _resolve(args.db or paths.get("db", "data/kb.db"))
         print(f"serving graph API on http://{args.host}:{args.port} using {db_path}", flush=True)
-        run_api(db_path, host=args.host, port=args.port)
+        run_api(
+            db_path,
+            host=args.host,
+            port=args.port,
+            provider=llm.get("provider"),
+            model=llm.get("model"),
+            fallback_model=llm.get("fallback_model"),
+        )
     return 0
 
 

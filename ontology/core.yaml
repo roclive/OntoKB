@@ -48,6 +48,9 @@ relations:
   develops:
     domain: Organization
     range: Technology
+  adopts:
+    domain: Organization
+    range: Technology
   makes:
     domain: Organization
     range: Product
@@ -69,7 +72,8 @@ relations:
     domain: Thing
     range: Event
   makesClaim:
-    domain: Content
+    # widened from Content so claims attach to the person/org who made them
+    domain: Thing
     range: Claim
   supports:
     domain: Claim

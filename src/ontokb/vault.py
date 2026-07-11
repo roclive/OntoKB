@@ -3,6 +3,7 @@ and rule-engine outputs (wiki pages / MOCs / report queue)."""
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -73,6 +74,13 @@ class ObsidianVault:
                 lines.append(f"- **{rel['predicate']}** → [[{slugify(rel['object'])}]]")
             else:
                 lines.append(f"- [[{slugify(rel['subject'])}]] **{rel['predicate']}** → this")
+        source_ids = json.loads(row["sources"]) if "sources" in row.keys() else []
+        docs = graph.contents_by_id(source_ids)
+        if docs:
+            lines += ["", "## Sources"]
+            for doc in docs:
+                label = doc["title"] or doc["id"]
+                lines.append(f"- [[{slugify(label)}]] ({doc['source']}) {doc['url']}")
         return self._write(f"Entities/{slugify(row['name'])}.md", "\n".join(lines) + "\n")
 
     def apply_action(self, graph: GraphStore, action) -> Path | None:

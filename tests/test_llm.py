@@ -4,11 +4,32 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from ontokb.llm import process_content
+from ontokb.llm import answer_graph_question, process_content
 from ontokb.models import ContentItem
 from ontokb.ontology import Ontology
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_answer_graph_question_passes_retrieved_context_to_openai():
+    calls = []
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(output_text="Codex 使用 harness agent。", status="completed")
+
+    answer = answer_graph_question(
+        "Codex 使用什么？",
+        {"relations": [{"relation": "Codex -- uses -> harness agent"}]},
+        client=SimpleNamespace(responses=FakeResponses()),
+        provider="openai",
+        model="test-model",
+    )
+
+    assert answer == "Codex 使用 harness agent。"
+    assert calls[0]["model"] == "test-model"
+    assert "Codex -- uses -> harness agent" in calls[0]["input"]
 
 
 def test_process_content_defaults_to_openai_responses():
@@ -49,6 +70,8 @@ def test_process_content_defaults_to_openai_responses():
     assert processed.summary == "总结"
     assert processed.relevance == {"AI agents": 0.8}
     assert calls[0]["model"] == "gpt-5.5"
+    assert "Simplified Chinese" in calls[0]["instructions"]
+    assert "Entity resolution" in calls[0]["instructions"]
     assert calls[0]["text"]["format"]["type"] == "json_schema"
     assert calls[0]["text"]["format"]["strict"] is True
     schema = calls[0]["text"]["format"]["schema"]

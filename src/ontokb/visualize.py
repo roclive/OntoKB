@@ -73,7 +73,7 @@ def export_html(graph: GraphStore, out_path: str | Path,
     return out
 
 
-_TEMPLATE = """<!DOCTYPE html>
+_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -111,22 +111,51 @@ header h1 { font-size: 15px; font-weight: 600; margin: 0 8px 0 0; }
   background: var(--panel); color: var(--text); outline: none;
 }
 #stat { font-size: 12px; color: var(--muted); }
-#workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 380px; }
+#workspace {
+  --panel-width: 380px; flex: 1; min-height: 0; display: grid;
+  grid-template-columns: minmax(0, 1fr) 7px minmax(300px, var(--panel-width));
+}
 #graph { min-height: 0; }
 #graph svg { width: 100%%; height: 100%%; display: block; }
+#workspace-resizer {
+  position: relative; z-index: 2; cursor: col-resize; touch-action: none; outline: none;
+  background: transparent;
+}
+#workspace-resizer::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 1px;
+  background: var(--border); transition: width 120ms ease, left 120ms ease, background 120ms ease;
+}
+#workspace-resizer:hover::after, #workspace-resizer:focus-visible::after, #workspace-resizer.dragging::after {
+  left: 2px; width: 3px; background: color-mix(in srgb, var(--text) 42%%, var(--border));
+}
+body.resizing { cursor: col-resize; user-select: none; }
 #query-panel {
-  min-width: 0; border-left: 1px solid var(--border); background: var(--panel);
+  min-width: 0; background: var(--panel);
   display: flex; flex-direction: column; min-height: 0;
 }
+.panel-tabs {
+  display: grid; grid-template-columns: 1fr 1fr; padding: 8px 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.panel-tab {
+  padding: 8px 4px 9px; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; color: var(--muted); font: inherit; cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+.panel-tab:hover { color: var(--text); }
+.panel-tab.active { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }
+.panel-view { display: none; min-height: 0; flex: 1; }
+.panel-view.active { display: flex; flex-direction: column; animation: panel-in 160ms ease-out; }
+@keyframes panel-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 #query-form { padding: 14px; display: grid; gap: 10px; border-bottom: 1px solid var(--border); }
 #query-form label { font-size: 12px; color: var(--muted); }
 #query-row { display: grid; grid-template-columns: minmax(0, 1fr) 76px; gap: 8px; }
-#query-input, #api-base, #query-mode {
+#query-input, #api-base, #query-mode, #chat-mode {
   width: 100%%; padding: 7px 9px; font-size: 13px;
   border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg); color: var(--text); outline: none;
 }
-#query-input:focus, #api-base:focus, #query-mode:focus, #search:focus {
+#query-input:focus, #api-base:focus, #query-mode:focus, #chat-mode:focus, #search:focus {
   border-color: color-mix(in srgb, var(--text) 35%%, var(--border));
 }
 #query-button {
@@ -134,7 +163,18 @@ header h1 { font-size: 15px; font-weight: 600; margin: 0 8px 0 0; }
   color: var(--bg); font-size: 13px; cursor: pointer;
 }
 #query-button:disabled { opacity: 0.5; cursor: default; }
-#query-options { display: grid; grid-template-columns: minmax(0, 1fr) 108px; gap: 8px; align-items: end; }
+#query-options { display: grid; grid-template-columns: minmax(0, 1fr) 86px; gap: 8px; align-items: stretch; }
+#api-base { grid-column: 1 / -1; }
+.top-field {
+  min-width: 0; padding: 0 7px; display: flex; align-items: center; gap: 3px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+  color: var(--muted); font-size: 11px;
+}
+.top-field:focus-within { border-color: color-mix(in srgb, var(--text) 35%%, var(--border)); }
+.top-field input {
+  min-width: 0; width: 100%%; padding: 7px 0; border: 0; outline: 0;
+  background: transparent; color: var(--text); font: inherit;
+}
 #query-expand-label {
   display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted);
 }
@@ -143,7 +183,7 @@ header h1 { font-size: 15px; font-weight: 600; margin: 0 8px 0 0; }
   padding: 8px 14px; font-size: 12px; color: var(--muted);
   border-bottom: 1px solid var(--border);
 }
-#query-results { min-height: 0; overflow: auto; }
+#query-results { flex: 1; min-height: 0; overflow: auto; }
 #query-results table { width: 100%%; border-collapse: collapse; table-layout: fixed; }
 #query-results th, #query-results td {
   padding: 8px 10px; border-bottom: 1px solid var(--border);
@@ -155,6 +195,70 @@ header h1 { font-size: 15px; font-weight: 600; margin: 0 8px 0 0; }
 #query-results tbody tr:hover { background: color-mix(in srgb, var(--text) 7%%, transparent); }
 #query-results tbody tr.active { background: color-mix(in srgb, var(--text) 12%%, transparent); }
 #query-empty { padding: 14px; color: var(--muted); font-size: 13px; }
+#chat-messages {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 16px 14px 10px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.chat-intro { color: var(--muted); font-size: 13px; max-width: 29em; }
+.chat-message { animation: message-in 180ms ease-out; }
+@keyframes message-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+.chat-role { margin-bottom: 4px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.chat-body { line-height: 1.65; overflow-wrap: anywhere; }
+.chat-body > :first-child { margin-top: 0; }
+.chat-body > :last-child { margin-bottom: 0; }
+.chat-body p { margin: 0 0 9px; }
+.chat-body h1, .chat-body h2, .chat-body h3, .chat-body h4 {
+  margin: 16px 0 7px; line-height: 1.3; color: var(--text); font-weight: 650;
+}
+.chat-body h1 { font-size: 18px; }
+.chat-body h2 { font-size: 16px; }
+.chat-body h3, .chat-body h4 { font-size: 14px; }
+.chat-body ul, .chat-body ol { margin: 5px 0 10px; padding-left: 21px; }
+.chat-body li { margin: 3px 0; padding-left: 2px; }
+.chat-body blockquote {
+  margin: 10px 0; padding: 2px 0 2px 11px; border-left: 2px solid var(--border); color: var(--muted);
+}
+.chat-body code {
+  padding: 1px 4px; border-radius: 4px; background: color-mix(in srgb, var(--text) 8%%, transparent);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.chat-body pre {
+  margin: 10px 0; padding: 10px 11px; overflow-x: auto; border: 1px solid var(--border);
+  border-radius: 7px; background: var(--bg); white-space: pre;
+}
+.chat-body pre code { padding: 0; border-radius: 0; background: transparent; }
+.chat-body a { color: var(--text); text-decoration-color: var(--muted); text-underline-offset: 2px; }
+.chat-body hr { margin: 13px 0; border: 0; border-top: 1px solid var(--border); }
+.chat-table-wrap { margin: 10px 0; overflow-x: auto; border: 1px solid var(--border); border-radius: 7px; }
+.chat-body table { width: 100%%; border-collapse: collapse; font-size: 12px; }
+.chat-body th, .chat-body td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.chat-body th { background: color-mix(in srgb, var(--text) 5%%, transparent); font-weight: 650; }
+.chat-body tr:last-child td { border-bottom: 0; }
+.chat-message.user { margin-left: 28px; }
+.chat-message.user .chat-body {
+  padding: 9px 11px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border);
+  white-space: pre-wrap;
+}
+.chat-sources { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+#chat-form { padding: 10px 14px 14px; border-top: 1px solid var(--border); }
+#chat-options { display: grid; grid-template-columns: minmax(0, 1fr) 86px; gap: 8px; margin-bottom: 8px; }
+#chat-options select { width: 100%%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); outline: none; }
+#chat-expand-label { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 9px; color: var(--muted); font-size: 12px; }
+#chat-expand { margin: 0; accent-color: var(--text); }
+#chat-composer { display: grid; grid-template-columns: minmax(0, 1fr) 66px; gap: 8px; align-items: end; }
+#chat-input {
+  width: 100%%; min-height: 42px; max-height: 120px; resize: vertical; padding: 9px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text);
+  font: inherit; outline: none;
+}
+#chat-input:focus { border-color: color-mix(in srgb, var(--text) 35%%, var(--border)); }
+#chat-button {
+  height: 42px; border: 0; border-radius: 8px; background: var(--text); color: var(--bg);
+  font: inherit; cursor: pointer; transition: opacity 140ms ease, transform 140ms ease;
+}
+#chat-button:hover { transform: translateY(-1px); }
+#chat-button:disabled { opacity: .48; transform: none; cursor: default; }
+.chat-hint { margin-top: 7px; color: var(--muted); font-size: 11px; }
 #info {
   padding: 8px 16px; min-height: 56px; max-height: 120px; overflow-y: auto;
   font-size: 13px; color: var(--muted); border-top: 1px solid var(--border);
@@ -164,6 +268,7 @@ header h1 { font-size: 15px; font-weight: 600; margin: 0 8px 0 0; }
 @media (max-width: 860px) {
   body { height: auto; min-height: 100vh; }
   #workspace { grid-template-columns: 1fr; grid-template-rows: 60vh auto; }
+  #workspace-resizer { display: none; }
   #query-panel { border-left: 0; border-top: 1px solid var(--border); max-height: 46vh; }
   #search { margin-left: 0; flex: 1 1 160px; }
 }
@@ -178,24 +283,52 @@ header h1 { font-size: 15px; font-weight: 600; margin: 0 8px 0 0; }
 </header>
 <main id="workspace">
   <div id="graph"></div>
+  <div id="workspace-resizer" role="separator" aria-label="调整图谱与右侧面板宽度" aria-orientation="vertical" tabindex="0"></div>
   <aside id="query-panel">
-    <form id="query-form">
-      <label for="query-input">查询 knowledge graph</label>
-      <div id="query-row">
-        <input id="query-input" type="search" placeholder="harness agent" autocomplete="off">
-        <button id="query-button" type="submit">查询</button>
+    <nav class="panel-tabs" aria-label="右侧工具">
+      <button class="panel-tab active" type="button" data-panel="query-view">查询</button>
+      <button class="panel-tab" type="button" data-panel="chat-view">Chat</button>
+    </nav>
+    <section id="query-view" class="panel-view active">
+      <form id="query-form">
+        <label for="query-input">查询 knowledge graph</label>
+        <div id="query-row">
+          <input id="query-input" type="search" placeholder="harness agent" autocomplete="off">
+          <button id="query-button" type="submit">查询</button>
+        </div>
+        <div id="query-options">
+          <input id="api-base" type="url" value="http://127.0.0.1:8765" aria-label="API 地址">
+          <select id="query-mode" aria-label="查询模式">
+            <option value="terms">按词匹配</option>
+            <option value="phrase">全文匹配</option>
+          </select>
+          <label class="top-field">Top=<input id="query-top" type="number" value="20" min="1" max="200" step="1" aria-label="查询 Top K"></label>
+        </div>
+        <label id="query-expand-label"><input id="query-expand" type="checkbox" checked> 扩展相关词</label>
+      </form>
+      <div id="query-status">启动 `ontokb api` 后可查询 SQLite graph。</div>
+      <div id="query-results"><div id="query-empty">输入关键词后查询相关节点和一跳关系。</div></div>
+    </section>
+    <section id="chat-view" class="panel-view">
+      <div id="chat-messages" aria-live="polite">
+        <div class="chat-intro">向知识库提问。系统会先检索 knowledge graph，再让 LLM 基于命中的实体与关系回答。</div>
       </div>
-      <div id="query-options">
-        <input id="api-base" type="url" value="http://127.0.0.1:8765" aria-label="API 地址">
-        <select id="query-mode" aria-label="查询模式">
-          <option value="terms">按词匹配</option>
-          <option value="phrase">整句匹配</option>
-        </select>
-      </div>
-      <label id="query-expand-label"><input id="query-expand" type="checkbox" checked> 扩展相关词</label>
-    </form>
-    <div id="query-status">启动 `ontokb api` 后可查询 SQLite graph。</div>
-    <div id="query-results"><div id="query-empty">输入关键词后查询相关节点和一跳关系。</div></div>
+      <form id="chat-form">
+        <div id="chat-options">
+          <select id="chat-mode" aria-label="Chat 匹配模式">
+            <option value="terms">按词匹配</option>
+            <option value="phrase">全文匹配</option>
+          </select>
+          <label class="top-field">Top=<input id="chat-top" type="number" value="20" min="1" max="200" step="1" aria-label="Chat Top K"></label>
+        </div>
+        <label id="chat-expand-label"><input id="chat-expand" type="checkbox" checked> 扩展相关词</label>
+        <div id="chat-composer">
+          <textarea id="chat-input" rows="2" placeholder="例如：Codex 使用了什么技术？" aria-label="问题"></textarea>
+          <button id="chat-button" type="submit">发送</button>
+        </div>
+        <div class="chat-hint">Enter 发送 · Shift + Enter 换行</div>
+      </form>
+    </section>
   </aside>
 </main>
 <div id="info">悬停查看关系,点击固定选中,双击空白处重置,拖拽节点调整布局,滚轮缩放。</div>
@@ -227,6 +360,12 @@ Object.keys(counts).sort((a,b)=>counts[b]-counts[a]).forEach(t => {
 });
 
 const box = document.getElementById('graph');
+const workspace = document.getElementById('workspace');
+const workspaceResizer = document.getElementById('workspace-resizer');
+const savedPanelWidth = Number(localStorage.getItem('graphPanelWidth'));
+if(Number.isFinite(savedPanelWidth) && savedPanelWidth >= 300){
+  workspace.style.setProperty('--panel-width', savedPanelWidth + 'px');
+}
 const W = box.clientWidth || 900, H = box.clientHeight || 600;
 const svg = d3.select('#graph').append('svg').attr('viewBox', [0,0,W,H]);
 const g = svg.append('g');
@@ -278,6 +417,63 @@ sim.on('tick', () => {
   edgeLabel.attr('x',d=>(d.source.x+d.target.x)/2).attr('y',d=>(d.source.y+d.target.y)/2 - 3);
   node.attr('transform', d=>'translate('+d.x+','+d.y+')');
 });
+
+let graphResizeFrame = 0;
+new ResizeObserver(() => {
+  cancelAnimationFrame(graphResizeFrame);
+  graphResizeFrame = requestAnimationFrame(() => {
+    const width = box.clientWidth || W;
+    const height = box.clientHeight || H;
+    svg.attr('viewBox', [0, 0, width, height]);
+    sim.force('center', d3.forceCenter(width / 2, height / 2));
+    sim.force('x', d3.forceX(width / 2).strength(0.05));
+    sim.force('y', d3.forceY(height / 2).strength(0.06));
+    sim.alpha(0.16).restart();
+  });
+}).observe(box);
+
+function setPanelWidth(width, persist = true){
+  const available = workspace.getBoundingClientRect().width;
+  const max = Math.max(300, available - 320);
+  const next = Math.round(Math.min(max, Math.max(300, width)));
+  workspace.style.setProperty('--panel-width', next + 'px');
+  workspaceResizer.setAttribute('aria-valuenow', String(next));
+  workspaceResizer.setAttribute('aria-valuemin', '300');
+  workspaceResizer.setAttribute('aria-valuemax', String(Math.round(max)));
+  if(persist) localStorage.setItem('graphPanelWidth', String(next));
+}
+
+workspaceResizer.addEventListener('pointerdown', ev => {
+  if(matchMedia('(max-width: 860px)').matches) return;
+  workspaceResizer.setPointerCapture(ev.pointerId);
+  workspaceResizer.classList.add('dragging');
+  document.body.classList.add('resizing');
+});
+workspaceResizer.addEventListener('pointermove', ev => {
+  if(!workspaceResizer.hasPointerCapture(ev.pointerId)) return;
+  const rect = workspace.getBoundingClientRect();
+  setPanelWidth(rect.right - ev.clientX, false);
+});
+function finishPanelResize(ev){
+  if(workspaceResizer.hasPointerCapture(ev.pointerId)) workspaceResizer.releasePointerCapture(ev.pointerId);
+  workspaceResizer.classList.remove('dragging');
+  document.body.classList.remove('resizing');
+  const width = parseFloat(getComputedStyle(workspace).getPropertyValue('--panel-width'));
+  if(Number.isFinite(width)) localStorage.setItem('graphPanelWidth', String(Math.round(width)));
+}
+workspaceResizer.addEventListener('pointerup', finishPanelResize);
+workspaceResizer.addEventListener('pointercancel', finishPanelResize);
+workspaceResizer.addEventListener('dblclick', () => {
+  localStorage.removeItem('graphPanelWidth');
+  setPanelWidth(380, false);
+});
+workspaceResizer.addEventListener('keydown', ev => {
+  if(!['ArrowLeft', 'ArrowRight'].includes(ev.key)) return;
+  ev.preventDefault();
+  const current = parseFloat(getComputedStyle(workspace).getPropertyValue('--panel-width')) || 380;
+  setPanelWidth(current + (ev.key === 'ArrowLeft' ? 20 : -20));
+});
+setPanelWidth(savedPanelWidth || 380, false);
 
 function neighbors(id){
   const s = new Set([id]);
@@ -351,17 +547,67 @@ const queryInput = document.getElementById('query-input');
 const apiBase = document.getElementById('api-base');
 const queryMode = document.getElementById('query-mode');
 const queryExpand = document.getElementById('query-expand');
+const queryTop = document.getElementById('query-top');
 const queryButton = document.getElementById('query-button');
 const queryStatus = document.getElementById('query-status');
 const queryResults = document.getElementById('query-results');
+const chatForm = document.getElementById('chat-form');
+const chatInput = document.getElementById('chat-input');
+const chatButton = document.getElementById('chat-button');
+const chatMessages = document.getElementById('chat-messages');
+const chatMode = document.getElementById('chat-mode');
+const chatExpand = document.getElementById('chat-expand');
+const chatTop = document.getElementById('chat-top');
+const chatIntro = chatMessages.querySelector('.chat-intro');
+let chatHealthChecked = false;
+
+async function checkChatHealth(){
+  if(chatHealthChecked) return;
+  chatHealthChecked = true;
+  try {
+    const res = await fetch(apiUrl('/health', {}));
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const health = await res.json();
+    if(health.chat !== true){
+      chatIntro.textContent = '当前运行的是旧版 API，不支持 Chat。请停止后重新运行 ontokb api。';
+      chatIntro.dataset.state = 'error';
+    } else if(!health.llm_configured){
+      const keyName = health.llm_provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
+      chatIntro.textContent = '后端已连接，但未检测到 ' + keyName + '。请设置 Key 后重启 ontokb api。';
+      chatIntro.dataset.state = 'error';
+    }
+  } catch (err) {
+    chatIntro.textContent = '无法连接 Chat API。请确认 ontokb api 已在 127.0.0.1:8765 运行。';
+    chatIntro.dataset.state = 'error';
+  }
+}
+
+document.querySelectorAll('.panel-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.panel-tab').forEach(el => el.classList.toggle('active', el === tab));
+    document.querySelectorAll('.panel-view').forEach(el => el.classList.toggle('active', el.id === tab.dataset.panel));
+    if(tab.dataset.panel === 'chat-view'){
+      checkChatHealth();
+      chatInput.focus();
+    }
+  });
+});
 
 const params = new URLSearchParams(location.search);
 if(params.get('api')) apiBase.value = params.get('api');
 else if(localStorage.getItem('graphApiBase')) apiBase.value = localStorage.getItem('graphApiBase');
 apiBase.addEventListener('change', () => localStorage.setItem('graphApiBase', apiBase.value.trim()));
 
+function validTop(input){
+  const value = Number(input.value);
+  const valid = Number.isInteger(value) && value >= 1 && value <= 200;
+  input.setCustomValidity(valid ? '' : 'Top K 必须是 1 到 200 之间的整数');
+  if(!valid) input.reportValidity();
+  return valid ? value : null;
+}
+
 function apiUrl(path, query){
-  const base = apiBase.value.trim().replace(/\\/$/, '');
+  const base = apiBase.value.trim().replace(/\/$/, '');
   const url = new URL(base + path);
   Object.entries(query).forEach(([k,v]) => url.searchParams.set(k, v));
   return url.toString();
@@ -399,6 +645,8 @@ queryForm.addEventListener('submit', async ev => {
     queryInput.focus();
     return;
   }
+  const top = validTop(queryTop);
+  if(top === null) return;
   queryButton.disabled = true;
   queryStatus.textContent = '查询中…';
   try {
@@ -406,7 +654,7 @@ queryForm.addEventListener('submit', async ev => {
       q,
       mode: queryMode.value,
       expand: queryExpand.checked ? '1' : '0',
-      limit: '200',
+      limit: String(top),
     }));
     if(!res.ok) throw new Error(await res.text());
     renderQueryResult(await res.json());
@@ -415,6 +663,236 @@ queryForm.addEventListener('submit', async ev => {
     queryStatus.textContent = String(err.message || err);
   } finally {
     queryButton.disabled = false;
+  }
+});
+
+function renderInlineMarkdown(parent, source){
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\n]+\*|\[[^\]]+\]\([^)]+\))/g;
+  let cursor = 0;
+  for(const match of source.matchAll(pattern)){
+    if(match.index > cursor) parent.appendChild(document.createTextNode(source.slice(cursor, match.index)));
+    const token = match[0];
+    let element;
+    if(token.startsWith('`')){
+      element = document.createElement('code');
+      element.textContent = token.slice(1, -1);
+    } else if(token.startsWith('**')){
+      element = document.createElement('strong');
+      element.textContent = token.slice(2, -2);
+    } else if(token.startsWith('*')){
+      element = document.createElement('em');
+      element.textContent = token.slice(1, -1);
+    } else {
+      const parts = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      const href = parts[2].trim();
+      let safe = false;
+      try {
+        const url = new URL(href, location.href);
+        safe = ['http:', 'https:', 'mailto:'].includes(url.protocol);
+      } catch (err) {}
+      if(safe){
+        element = document.createElement('a');
+        element.href = href;
+        element.target = '_blank';
+        element.rel = 'noopener noreferrer';
+        element.textContent = parts[1];
+      } else {
+        element = document.createTextNode(parts[1] + ' (' + href + ')');
+      }
+    }
+    parent.appendChild(element);
+    cursor = match.index + token.length;
+  }
+  if(cursor < source.length) parent.appendChild(document.createTextNode(source.slice(cursor)));
+}
+
+function markdownTableCells(line){
+  return line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim());
+}
+
+function renderMarkdown(container, markdown){
+  const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
+  const fragment = document.createDocumentFragment();
+  const tableDivider = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+  const isBlockStart = (line, index) => /^\s*```/.test(line) || /^\s*#{1,4}\s+/.test(line)
+    || /^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line) || /^\s*>\s?/.test(line)
+    || /^\s*[-+*]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line)
+    || (line.includes('|') && index + 1 < lines.length && tableDivider.test(lines[index + 1]));
+
+  for(let i = 0; i < lines.length;){
+    const line = lines[i];
+    if(!line.trim()){ i += 1; continue; }
+
+    const fence = line.match(/^\s*```([\w+-]*)\s*$/);
+    if(fence){
+      const codeLines = [];
+      i += 1;
+      while(i < lines.length && !/^\s*```\s*$/.test(lines[i])) codeLines.push(lines[i++]);
+      if(i < lines.length) i += 1;
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      if(fence[1]) code.dataset.language = fence[1];
+      code.textContent = codeLines.join('\n');
+      pre.appendChild(code);
+      fragment.appendChild(pre);
+      continue;
+    }
+
+    const heading = line.match(/^\s*(#{1,4})\s+(.+)$/);
+    if(heading){
+      const h = document.createElement('h' + heading[1].length);
+      renderInlineMarkdown(h, heading[2].replace(/\s+#+\s*$/, ''));
+      fragment.appendChild(h);
+      i += 1;
+      continue;
+    }
+
+    if(/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)){
+      fragment.appendChild(document.createElement('hr'));
+      i += 1;
+      continue;
+    }
+
+    if(line.includes('|') && i + 1 < lines.length && tableDivider.test(lines[i + 1])){
+      const headers = markdownTableCells(line);
+      i += 2;
+      const wrap = document.createElement('div');
+      wrap.className = 'chat-table-wrap';
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const headerRow = document.createElement('tr');
+      headers.forEach(value => {
+        const th = document.createElement('th');
+        renderInlineMarkdown(th, value);
+        headerRow.appendChild(th);
+      });
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      while(i < lines.length && lines[i].includes('|') && lines[i].trim()){
+        const tr = document.createElement('tr');
+        markdownTableCells(lines[i]).forEach(value => {
+          const td = document.createElement('td');
+          renderInlineMarkdown(td, value);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+        i += 1;
+      }
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      fragment.appendChild(wrap);
+      continue;
+    }
+
+    if(/^\s*>\s?/.test(line)){
+      const quote = document.createElement('blockquote');
+      const quoteLines = [];
+      while(i < lines.length && /^\s*>\s?/.test(lines[i])) quoteLines.push(lines[i++].replace(/^\s*>\s?/, ''));
+      renderInlineMarkdown(quote, quoteLines.join(' '));
+      fragment.appendChild(quote);
+      continue;
+    }
+
+    const listMatch = line.match(/^\s*([-+*]|\d+[.)])\s+(.+)$/);
+    if(listMatch){
+      const ordered = /^\d/.test(listMatch[1]);
+      const list = document.createElement(ordered ? 'ol' : 'ul');
+      const listPattern = ordered ? /^\s*\d+[.)]\s+(.+)$/ : /^\s*[-+*]\s+(.+)$/;
+      while(i < lines.length){
+        const itemMatch = lines[i].match(listPattern);
+        if(!itemMatch) break;
+        const li = document.createElement('li');
+        renderInlineMarkdown(li, itemMatch[1]);
+        list.appendChild(li);
+        i += 1;
+      }
+      fragment.appendChild(list);
+      continue;
+    }
+
+    const paragraphLines = [line.trim()];
+    i += 1;
+    while(i < lines.length && lines[i].trim() && !isBlockStart(lines[i], i)) paragraphLines.push(lines[i++].trim());
+    const paragraph = document.createElement('p');
+    renderInlineMarkdown(paragraph, paragraphLines.join(' '));
+    fragment.appendChild(paragraph);
+  }
+  container.replaceChildren(fragment);
+}
+
+function appendMessage(role, body, context){
+  const message = document.createElement('div');
+  message.className = 'chat-message ' + role;
+  const roleLabel = document.createElement('div');
+  roleLabel.className = 'chat-role';
+  roleLabel.textContent = role === 'user' ? 'You' : 'Knowledge graph';
+  const content = document.createElement('div');
+  content.className = 'chat-body';
+  if(role === 'assistant') renderMarkdown(content, body);
+  else content.textContent = body;
+  message.append(roleLabel, content);
+  const relations = context && context.relations ? context.relations : [];
+  if(role === 'assistant' && context){
+    const sources = document.createElement('div');
+    sources.className = 'chat-sources';
+    const modeLabel = context && context.mode === 'phrase' ? '全文匹配' : '按词匹配';
+    const expandLabel = context && context.expand ? '扩展' : '不扩展';
+    const topLabel = context && context.top ? 'Top ' + context.top : '';
+    const strategy = [modeLabel, expandLabel, topLabel].filter(Boolean).join(' · ');
+    sources.textContent = relations.length
+      ? 'KG 上下文 · ' + strategy + ' · ' + relations.length + ' 条关系：' + relations.slice(0, 3).map(row => row.relation).join('；')
+      : 'KG 上下文 · ' + strategy + ' · 未命中关系';
+    message.appendChild(sources);
+  }
+  chatMessages.appendChild(message);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+chatInput.addEventListener('keydown', ev => {
+  if(ev.key === 'Enter' && !ev.shiftKey){
+    ev.preventDefault();
+    chatForm.requestSubmit();
+  }
+});
+
+chatForm.addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const question = chatInput.value.trim();
+  if(!question) return chatInput.focus();
+  const top = validTop(chatTop);
+  if(top === null) return;
+  appendMessage('user', question);
+  chatInput.value = '';
+  chatButton.disabled = true;
+  chatButton.textContent = '思考中';
+  try {
+    const res = await fetch(apiUrl('/api/chat', {}), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        question,
+        mode: chatMode.value,
+        expand: chatExpand.checked,
+        top,
+      }),
+    });
+    const result = await res.json();
+    if(!res.ok) throw new Error(result.error || '请求失败');
+    appendMessage('assistant', result.answer, result.context);
+    if(result.context && result.context.edges && result.context.edges.length){
+      highlightRelation(result.context.edges[0]);
+    }
+  } catch (err) {
+    const detail = String(err.message || err);
+    const hint = detail === 'Load failed' || detail === 'Failed to fetch'
+      ? '无法连接 Chat API。可能仍在运行旧版后端，请停止后重新启动 `ontokb api`。'
+      : '暂时无法回答：' + detail;
+    appendMessage('assistant', hint);
+  } finally {
+    chatButton.disabled = false;
+    chatButton.textContent = '发送';
+    chatInput.focus();
   }
 });
 </script>

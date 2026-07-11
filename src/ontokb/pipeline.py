@@ -5,18 +5,22 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
 from .graph import GraphStore
 from .llm import process_content
-from .models import ContentItem
+from .models import ContentItem, ExtractedEntity, ExtractedTriple
 from .ontology import Ontology, OntologyError
 from .rules import RuleEngine
+from .sources.youtube import DEFAULT_WHISPER_LANGUAGE
 from .vault import ObsidianVault
 
 log = logging.getLogger("ontokb")
+
+DEFAULT_OUTPUT_LANGUAGE = "Simplified Chinese"
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -51,7 +55,7 @@ class Pipeline:
                 item,
                 cookies_file=yt.get("cookies_file"),
                 whisper_model=yt.get("whisper_model", "small"),
-                whisper_language=yt.get("whisper_language"),
+                whisper_language=yt.get("whisper_language") or DEFAULT_WHISPER_LANGUAGE,
                 whisper_device=yt.get("whisper_device", "cpu"),
                 whisper_compute_type=yt.get("whisper_compute_type", "int8"),
                 cache_dir=ROOT / paths.get("transcripts", "data/transcripts") / "youtube",
@@ -67,10 +71,18 @@ class Pipeline:
     # -- M3/M4: LLM processing + graph build -------------------------------
 
     def ingest(self, item: ContentItem, client=None) -> dict:
-        """Process one content item end to end. Returns a small stats dict."""
+        """Process one content item end to end. Returns a small stats dict.
+
+        Builds a two-tier graph: the LLM extracts the knowledge tier (entity-to-
+        entity relations), then the pipeline deterministically adds the document
+        tier — one Content node per ingested item, linked to every extracted
+        entity via mentions/about — so grounding never depends on LLM output.
+        """
         if not item.raw_text:
             self.fetch(item)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         llm = self.config.get("llm", {}) or {}
+        defaults = self.config.get("defaults", {}) or {}
         processed = process_content(
             item,
             self.ontology,
@@ -79,10 +91,14 @@ class Pipeline:
             provider=llm.get("provider"),
             model=llm.get("model"),
             fallback_model=llm.get("fallback_model"),
+            output_language=llm.get("output_language")
+            or defaults.get("output_language")
+            or DEFAULT_OUTPUT_LANGUAGE,
         )
 
         entity_types = {e.name: e.type for e in processed.entities}
         accepted, rejected = 0, 0
+        accepted_entities: list[str] = []
         for entity in processed.entities:
             try:
                 self.ontology.validate_entity(entity.type)
@@ -90,25 +106,118 @@ class Pipeline:
                 log.warning("entity rejected: %s", exc)
                 rejected += 1
                 continue
-            self.graph.upsert_entity(entity)
+            self.graph.upsert_entity(entity, source=item.id, added_time=now)
+            accepted_entities.append(entity.name)
         for triple in processed.triples:
             try:
-                if self.graph.add_triple(triple, self.ontology,
-                                         source=item.id, entity_types=entity_types):
+                if self.graph.add_triple(triple, self.ontology, source=item.id,
+                                         entity_types=entity_types, created_at=now):
                     accepted += 1
             except (OntologyError, ValueError) as exc:
                 log.warning("triple rejected: %s", exc)
                 rejected += 1
 
+        doc_links = self._link_document(item, processed.topics, accepted_entities, now)
+
         self.graph.upsert_content(
             item.id, item.kind, item.source, item.url, item.title,
             status="processed",
-            meta={"relevance": processed.relevance, "summary": processed.summary},
+            meta={"relevance": processed.relevance, "summary": processed.summary,
+                  "added_time": now},
         )
         self.vault.write_content_note(item, processed)
         for entity in processed.entities:
             self.vault.write_entity_note(self.graph, entity.name)
-        return {"content_id": item.id, "triples_accepted": accepted, "rejected": rejected}
+        return {"content_id": item.id, "triples_accepted": accepted,
+                "rejected": rejected, "document_links": doc_links}
+
+    def _link_document(
+        self,
+        item: ContentItem,
+        topics: list[str],
+        entity_names: list[str],
+        now: str,
+    ) -> int:
+        """Create the document-tier node for `item` and wire it to the knowledge
+        tier: Content --about--> Topic and Content --mentions--> entity."""
+        properties = {
+            "url": item.url,
+            "source": item.source,
+            "kind": item.kind,
+            "added_time": now,
+        }
+        if item.published_at:
+            properties["published_at"] = item.published_at
+        doc = ExtractedEntity(
+            name=item.title or item.id,
+            type="Content",
+            aliases=[item.id],  # stable handle even if the title changes
+            properties=properties,
+        )
+        doc_id = self.graph.upsert_entity(doc, source=item.id, added_time=now)
+
+        linked = 0
+        seen_ids = {doc_id}
+        for topic in dict.fromkeys(topics):
+            self.graph.upsert_entity(ExtractedEntity(name=topic, type="Topic"),
+                                     source=item.id, added_time=now)
+            linked += self._link_doc_edge(doc.name, "about", topic, item.id, now, seen_ids)
+        for name in dict.fromkeys(entity_names):
+            linked += self._link_doc_edge(doc.name, "mentions", name, item.id, now, seen_ids)
+        return linked
+
+    def _link_doc_edge(
+        self,
+        doc_name: str,
+        predicate: str,
+        target: str,
+        source: str,
+        now: str,
+        seen_ids: set[int],
+    ) -> int:
+        """Add one document-tier edge, skipping self-loops and already-linked
+        targets (an entity that is also a topic only gets the `about` edge)."""
+        row = self.graph.get_entity(target)
+        if row is None or row["id"] in seen_ids:
+            return 0
+        triple = ExtractedTriple(subject=doc_name, predicate=predicate,
+                                 object=target, confidence=1.0, evidence="")
+        try:
+            added = self.graph.add_triple(triple, self.ontology, source=source, created_at=now)
+        except (OntologyError, ValueError) as exc:
+            log.info("document link skipped: %s", exc)
+            return 0
+        seen_ids.add(row["id"])  # inserted now, or already linked by a past ingest
+        return 1 if added else 0
+
+    def backfill_documents(self) -> dict:
+        """Rebuild the document tier for contents ingested before the two-tier
+        refactor: one Content node per processed row, mentions edges to every
+        entity that appears in a triple sourced from it, and source tags on
+        those entities. Offline — no LLM calls; safe to re-run."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        docs, links = 0, 0
+        rows = self.graph.conn.execute(
+            "SELECT id, kind, source, url, title FROM contents WHERE status='processed'"
+        ).fetchall()
+        for row in rows:
+            involved = self.graph.conn.execute(
+                """SELECT DISTINCT e.name AS name, e.type AS type
+                   FROM triples t
+                   JOIN entities e ON e.id = t.subject_id OR e.id = t.object_id
+                   WHERE t.source = ?""",
+                (row["id"],),
+            ).fetchall()
+            for ent in involved:
+                self.graph.upsert_entity(
+                    ExtractedEntity(name=ent["name"], type=ent["type"]),
+                    source=row["id"], added_time=now,
+                )
+            item = ContentItem(id=row["id"], kind=row["kind"], source=row["source"],
+                               url=row["url"], title=row["title"])
+            links += self._link_document(item, [], [ent["name"] for ent in involved], now)
+            docs += 1
+        return {"documents": docs, "links_added": links}
 
     # -- M5: rules ----------------------------------------------------------
 

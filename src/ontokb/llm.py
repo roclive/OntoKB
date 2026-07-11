@@ -12,23 +12,103 @@ from .ontology import Ontology
 DEFAULT_PROVIDER = "openai"
 MODEL = os.environ.get("ONTOKB_MODEL", "gpt-5.5")
 FALLBACK_MODEL = os.environ.get("ONTOKB_FALLBACK_MODEL", "claude-opus-4-8")
+DEFAULT_OUTPUT_LANGUAGE = "Simplified Chinese"
 MAX_INPUT_CHARS = 150_000  # ~1h video transcript fits comfortably
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT_TEMPLATE = """\
 You are a knowledge extraction engine for a personal research knowledge base.
 Given the full text of a tech video transcript or article, produce:
-1. summary: a faithful summary in the same language as the source (5-10 sentences).
-2. key_points: the concrete takeaways, one sentence each.
+1. summary: a faithful summary in {output_language} (5-10 sentences).
+2. key_points: the concrete takeaways in {output_language}, one sentence each.
 3. topics: the Topic entities this content is about (short noun phrases).
 4. relevance: a 0-1 score for each of the user's interests provided below.
 5. entities and triples that STRICTLY follow the ontology provided below.
    Only use listed classes and relations; respect domain/range. Include a short
    evidence quote for each triple. Do not invent facts not present in the text.
+
+   Entity resolution: use ONE canonical name per real-world entity across all
+   entities and triples. When the text refers to an entity indirectly or
+   descriptively (e.g. "GPT母公司" for OpenAI, "谷歌母公司" for Alphabet),
+   resolve it to the canonical entity instead of creating a duplicate, and
+   record such surface forms in that entity's aliases.
+
+   Focus on relations BETWEEN the entities that appear in the text (the
+   knowledge tier): Person worksAt Organization, Person/Organization makesClaim
+   Claim, Organization develops/adopts Technology, Claim supports/contradicts
+   Claim. The pipeline adds a Content node for the document being processed and
+   links it to every extracted entity via mentions/about automatically, so do
+   not extract this document itself as an entity; only create Content entities
+   for OTHER documents (papers, videos, articles) referenced by the text.
+
+   Output language: {output_language}. Use it by default for all human-readable
+   fields, including summaries, key points, topics, entity aliases/properties,
+   and Claim text. Keep globally recognized proper nouns in their common form.
+   Keep evidence quotes faithful to the source text; when the source is not in
+   {output_language}, append a concise {output_language} translation.
+"""
+SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(output_language=DEFAULT_OUTPUT_LANGUAGE)
+
+GRAPH_QA_PROMPT = """\
+You answer questions using a personal knowledge graph. Use the supplied graph
+context as your factual basis. Clearly say when the graph does not contain
+enough information; do not invent missing facts. Answer in the same language as
+the user's question, and keep the answer concise and direct.
 """
 
 
 class RefusalError(RuntimeError):
     pass
+
+
+def answer_graph_question(
+    question: str,
+    graph_context: dict,
+    *,
+    client=None,
+    provider: str | None = None,
+    model: str | None = None,
+    fallback_model: str | None = None,
+) -> str:
+    """Answer a question after graph context has already been retrieved."""
+    provider = os.environ.get("ONTOKB_LLM_PROVIDER", provider or DEFAULT_PROVIDER).lower()
+    model = os.environ.get("ONTOKB_MODEL", model or MODEL)
+    fallback_model = os.environ.get("ONTOKB_FALLBACK_MODEL", fallback_model or FALLBACK_MODEL)
+    context = json.dumps(graph_context, ensure_ascii=False, indent=2)
+    user_prompt = f"Question:\n{question}\n\nKnowledge graph context:\n{context}"
+
+    if provider in {"openai", "chatgpt"}:
+        if client is None:
+            from openai import OpenAI
+
+            client = OpenAI()
+        response = client.responses.create(
+            model=model,
+            instructions=GRAPH_QA_PROMPT,
+            input=user_prompt,
+            max_output_tokens=2000,
+        )
+        if getattr(response, "status", None) == "refused":
+            raise RefusalError("model declined to answer the question")
+        return _response_text(response).strip()
+
+    if provider == "anthropic":
+        if client is None:
+            import anthropic
+
+            client = anthropic.Anthropic()
+        response = client.beta.messages.create(
+            model=model,
+            max_tokens=2000,
+            betas=["server-side-fallback-2026-06-01"],
+            fallbacks=[{"model": fallback_model}],
+            system=GRAPH_QA_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        if response.stop_reason == "refusal":
+            raise RefusalError("model declined to answer the question")
+        return next(block.text for block in response.content if block.type == "text").strip()
+
+    raise ValueError(f"unsupported llm provider: {provider}")
 
 
 def process_content(
@@ -39,6 +119,7 @@ def process_content(
     provider: str | None = None,
     model: str | None = None,
     fallback_model: str | None = None,
+    output_language: str | None = None,
 ) -> ProcessedContent:
     """Run the extraction call. `client` is injectable for testing."""
     text = item.raw_text[:MAX_INPUT_CHARS]
@@ -51,15 +132,27 @@ def process_content(
     provider = os.environ.get("ONTOKB_LLM_PROVIDER", provider or DEFAULT_PROVIDER).lower()
     model = os.environ.get("ONTOKB_MODEL", model or MODEL)
     fallback_model = os.environ.get("ONTOKB_FALLBACK_MODEL", fallback_model or FALLBACK_MODEL)
+    output_language = os.environ.get(
+        "ONTOKB_OUTPUT_LANGUAGE",
+        output_language or DEFAULT_OUTPUT_LANGUAGE,
+    )
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(output_language=output_language)
 
     if provider in {"openai", "chatgpt"}:
-        return _process_with_openai(client, model, user_prompt).to_processed(item.id)
+        return _process_with_openai(client, model, user_prompt, system_prompt).to_processed(item.id)
     if provider == "anthropic":
-        return _process_with_anthropic(client, model, fallback_model, user_prompt).to_processed(item.id)
+        return _process_with_anthropic(
+            client, model, fallback_model, user_prompt, system_prompt
+        ).to_processed(item.id)
     raise ValueError(f"unsupported llm provider: {provider}")
 
 
-def _process_with_openai(client, model: str, user_prompt: str) -> ExtractionResult:
+def _process_with_openai(
+    client,
+    model: str,
+    user_prompt: str,
+    system_prompt: str,
+) -> ExtractionResult:
     if client is None:
         from openai import OpenAI  # optional dependency: pip install ontokb[llm]
 
@@ -67,7 +160,7 @@ def _process_with_openai(client, model: str, user_prompt: str) -> ExtractionResu
 
     response = client.responses.create(
         model=model,
-        instructions=SYSTEM_PROMPT,
+        instructions=system_prompt,
         input=user_prompt,
         max_output_tokens=16000,
         text={
@@ -91,6 +184,7 @@ def _process_with_anthropic(
     model: str,
     fallback_model: str,
     user_prompt: str,
+    system_prompt: str,
 ) -> ExtractionResult:
     if client is None:
         import anthropic  # optional dependency: pip install ontokb[llm]
@@ -101,7 +195,7 @@ def _process_with_anthropic(
         max_tokens=16000,
         betas=["server-side-fallback-2026-06-01"],
         fallbacks=[{"model": fallback_model}],
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         output_config={
             "format": {
                 "type": "json_schema",

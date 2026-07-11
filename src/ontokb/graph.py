@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS entities (
     norm_name TEXT NOT NULL UNIQUE,
     type TEXT NOT NULL,
     aliases TEXT NOT NULL DEFAULT '[]',
-    properties TEXT NOT NULL DEFAULT '{}'
+    properties TEXT NOT NULL DEFAULT '{}',
+    sources TEXT NOT NULL DEFAULT '[]',
+    added_time TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS aliases (
     norm_alias TEXT PRIMARY KEY,
@@ -36,6 +38,7 @@ CREATE TABLE IF NOT EXISTS triples (
     confidence REAL NOT NULL DEFAULT 0.8,
     source TEXT NOT NULL DEFAULT '',
     evidence TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
     UNIQUE(subject_id, predicate, object_id, source)
 );
 CREATE TABLE IF NOT EXISTS contents (
@@ -112,22 +115,48 @@ class GraphStore:
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add provenance columns to databases created before source tagging."""
+        entity_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(entities)")}
+        if "sources" not in entity_cols:
+            self.conn.execute("ALTER TABLE entities ADD COLUMN sources TEXT NOT NULL DEFAULT '[]'")
+        if "added_time" not in entity_cols:
+            self.conn.execute("ALTER TABLE entities ADD COLUMN added_time TEXT NOT NULL DEFAULT ''")
+        triple_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(triples)")}
+        if "created_at" not in triple_cols:
+            self.conn.execute("ALTER TABLE triples ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
 
     # -- entities ---------------------------------------------------------
 
-    def upsert_entity(self, entity: ExtractedEntity) -> int:
-        """Insert or merge an entity; aliases resolve to the same row."""
+    def upsert_entity(
+        self,
+        entity: ExtractedEntity,
+        source: str = "",
+        added_time: str = "",
+    ) -> int:
+        """Insert or merge an entity; aliases resolve to the same row.
+
+        `source` (a content id) is accumulated into the entity's sources list so
+        merged entities keep provenance from every document that mentioned them.
+        `added_time` is kept from the first sighting.
+        """
         norm = normalize(entity.name)
         row = self._resolve(norm)
         if row is None:
             cur = self.conn.execute(
-                "INSERT INTO entities (name, norm_name, type, aliases, properties) VALUES (?,?,?,?,?)",
+                "INSERT INTO entities (name, norm_name, type, aliases, properties, sources, added_time) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (entity.name, norm, entity.type,
                  json.dumps(entity.aliases, ensure_ascii=False),
-                 json.dumps(entity.properties, ensure_ascii=False)),
+                 json.dumps(entity.properties, ensure_ascii=False),
+                 json.dumps([source] if source else [], ensure_ascii=False),
+                 added_time),
             )
             eid = cur.lastrowid
         else:
@@ -136,10 +165,15 @@ class GraphStore:
             aliases.update(entity.aliases)
             props = json.loads(row["properties"])
             props.update(entity.properties)
+            sources = list(json.loads(row["sources"]))
+            if source and source not in sources:
+                sources.append(source)
             self.conn.execute(
-                "UPDATE entities SET aliases=?, properties=? WHERE id=?",
+                "UPDATE entities SET aliases=?, properties=?, sources=?, added_time=? WHERE id=?",
                 (json.dumps(sorted(aliases), ensure_ascii=False),
-                 json.dumps(props, ensure_ascii=False), eid),
+                 json.dumps(props, ensure_ascii=False),
+                 json.dumps(sources, ensure_ascii=False),
+                 row["added_time"] or added_time, eid),
             )
         for alias in entity.aliases:
             self.conn.execute(
@@ -199,7 +233,8 @@ class GraphStore:
         for term in terms:
             like = f"%{normalize(term)}%"
             rows = self.conn.execute(
-                """SELECT id, name, type, aliases, properties, 'name' AS matched_by, name AS matched_value
+                """SELECT id, name, type, aliases, properties, sources, added_time,
+                          'name' AS matched_by, name AS matched_value
                    FROM entities
                    WHERE norm_name LIKE ? OR lower(name) LIKE ?
                    ORDER BY name
@@ -210,7 +245,7 @@ class GraphStore:
                 _add_entity_match(matches, row, term)
 
             alias_rows = self.conn.execute(
-                """SELECT e.id, e.name, e.type, e.aliases, e.properties,
+                """SELECT e.id, e.name, e.type, e.aliases, e.properties, e.sources, e.added_time,
                           'alias' AS matched_by, a.norm_alias AS matched_value
                    FROM aliases a
                    JOIN entities e ON e.id = a.entity_id
@@ -223,7 +258,8 @@ class GraphStore:
                 _add_entity_match(matches, row, term)
 
             json_alias_rows = self.conn.execute(
-                """SELECT id, name, type, aliases, properties, 'alias_json' AS matched_by, aliases AS matched_value
+                """SELECT id, name, type, aliases, properties, sources, added_time,
+                          'alias_json' AS matched_by, aliases AS matched_value
                    FROM entities
                    WHERE lower(aliases) LIKE ?
                    ORDER BY name
@@ -258,7 +294,7 @@ class GraphStore:
                           s.id AS subject_id, s.name AS subject, s.type AS subject_type,
                           t.predicate,
                           o.id AS object_id, o.name AS object, o.type AS object_type,
-                          t.confidence, t.source, t.evidence
+                          t.confidence, t.source, t.evidence, t.created_at
                    FROM triples t
                    JOIN entities s ON s.id = t.subject_id
                    JOIN entities o ON o.id = t.object_id
@@ -305,6 +341,7 @@ class GraphStore:
         ontology: Ontology,
         source: str = "",
         entity_types: dict[str, str] | None = None,
+        created_at: str = "",
     ) -> bool:
         """Validate against the ontology and insert. Returns False on duplicate.
 
@@ -321,9 +358,10 @@ class GraphStore:
         ontology.validate_triple(subj_type, triple.predicate, obj_type)
         try:
             self.conn.execute(
-                "INSERT INTO triples (subject_id, predicate, object_id, confidence, source, evidence) "
-                "VALUES (?,?,?,?,?,?)",
-                (subj["id"], triple.predicate, obj["id"], triple.confidence, source, triple.evidence),
+                "INSERT INTO triples (subject_id, predicate, object_id, confidence, source, evidence, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (subj["id"], triple.predicate, obj["id"], triple.confidence, source,
+                 triple.evidence, created_at),
             )
         except sqlite3.IntegrityError:
             return False
@@ -346,7 +384,7 @@ class GraphStore:
             return []
         placeholders = ",".join("?" for _ in ids)
         rows = self.conn.execute(
-            f"""SELECT id, name, type, aliases, properties
+            f"""SELECT id, name, type, aliases, properties, sources, added_time
                 FROM entities
                 WHERE id IN ({placeholders})
                 ORDER BY name""",
@@ -379,6 +417,10 @@ class GraphStore:
         ]
 
     # -- contents ---------------------------------------------------------
+
+    def contents_by_id(self, ids) -> list[dict]:
+        """Public lookup of content rows (documents) by id, for provenance display."""
+        return self._contents_by_id(set(ids))
 
     def upsert_content(self, content_id: str, kind: str, source: str, url: str,
                        title: str = "", status: str = "queued", meta: dict | None = None) -> None:
@@ -488,6 +530,8 @@ def _entity_dict(row: sqlite3.Row) -> dict:
         "type": row["type"],
         "aliases": json.loads(row["aliases"]),
         "properties": json.loads(row["properties"]),
+        "sources": json.loads(row["sources"]),
+        "added_time": row["added_time"],
     }
 
 
@@ -515,4 +559,5 @@ def _edge_dict(row: sqlite3.Row) -> dict:
         "confidence": row["confidence"],
         "source": row["source"],
         "evidence": row["evidence"],
+        "created_at": row["created_at"],
     }

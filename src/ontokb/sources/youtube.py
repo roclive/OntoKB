@@ -13,6 +13,8 @@ from pathlib import Path
 
 from ..models import ContentItem
 
+DEFAULT_WHISPER_LANGUAGE = "zh"
+
 
 def _vid(url: str) -> str:
     m = re.search(r"(?:v=|youtu\.be/)([\w-]{11})", url)
@@ -82,7 +84,7 @@ def fetch_transcript(
     cookies_file: str | None = None,
     langs: tuple[str, ...] = ("zh-Hans", "zh", "en"),
     whisper_model: str = "small",
-    whisper_language: str | None = None,
+    whisper_language: str | None = DEFAULT_WHISPER_LANGUAGE,
     whisper_device: str = "cpu",
     whisper_compute_type: str = "int8",
     cache_dir: str | Path | None = None,
@@ -203,7 +205,7 @@ def _transcribe_with_whisper(
     item: ContentItem,
     cookies_file: str | None = None,
     model_size: str = "small",
-    language: str | None = None,
+    language: str | None = DEFAULT_WHISPER_LANGUAGE,
     device: str = "cpu",
     compute_type: str = "int8",
 ) -> str:
@@ -214,6 +216,7 @@ def _transcribe_with_whisper(
             f"no captions for {item.url}; install faster-whisper for local transcription"
         ) from exc
 
+    language = _normalize_whisper_language(language)
     with tempfile.TemporaryDirectory(prefix="ontokb-youtube-") as tmp:
         audio_path = _download_audio(item, Path(tmp), cookies_file=cookies_file)
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
@@ -229,6 +232,15 @@ def _transcribe_with_whisper(
     if not lines:
         raise RuntimeError(f"Whisper produced no transcript for {item.url}")
     return "\n".join(lines)
+
+
+def _normalize_whisper_language(language: str | None) -> str | None:
+    if language is None:
+        return None
+    language = language.strip()
+    if not language or language.lower() == "auto":
+        return None
+    return language
 
 
 def vtt_to_text(vtt: str) -> str:

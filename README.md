@@ -13,7 +13,9 @@ watch list / URLs ──► sources/ (yt-dlp 字幕 · 163 正文抽取)
                       llm.py (OpenAI/ChatGPT structured output)
                           │ summary · key_points · relevance · entities · triples
                           ▼
-        ontology/core.yaml ──校验──► graph.py (SQLite 三元组库, 别名归并)
+        ontology/core.yaml ──校验──► graph.py (SQLite 三元组库, 别名归并, 源标记)
+                          │ + 文档层: 每条内容一个 Content 节点
+                          │   (about/mentions 边由 pipeline 确定性生成)
                           │ facts
                           ▼
                       rules.py (前向链式规则引擎, rules/default.yaml)
@@ -22,12 +24,26 @@ watch list / URLs ──► sources/ (yt-dlp 字幕 · 163 正文抽取)
                       vault.py ──► Obsidian vault (Sources/Entities/Wiki/MOC/Reports)
 ```
 
+## 图谱建模：文档-实体双层图
+
+所有信息源（YouTube / 网易 / …）写入**同一张图**（统一 Schema），跨媒介的同一实体自动归并，
+同时通过源标记保持逻辑隔离与可溯源：
+
+- **文档层**：每条被 ingest 的内容由 pipeline 确定性地创建一个 `Content` 节点
+  （属性含 `url`、`source`、`kind`、`added_time`、`published_at`，并以 content id 为别名），
+  不依赖 LLM 输出；再自动生成 `Content --about--> Topic` 与 `Content --mentions--> 实体` 边。
+- **知识层**：LLM 只负责抽取实体之间的关系（`worksAt` / `develops` / `makesClaim` / …），
+  并按 prompt 做实体对齐——"GPT母公司"这类间接指称会解析到 `OpenAI` 并记入 aliases。
+- **源标记**：实体行累积 `sources`（提到过它的全部 content id）与 `added_time`（首次入库时间）；
+  每条三元组带 `source`（出处 content id）与 `created_at`。
+  查询任意实体即可顺着 `mentions` 边或 `sources` 字段回溯到原始视频/文章链接。
+
 ## 快速开始
 
 ```bash
 pip install -e ".[dev,llm,youtube,html]"
 cp config/config.example.yaml config/config.yaml   # 填 interests 和数据源
-pytest                                             # 30 个单测,无网络依赖
+pytest                                             # 40 个单测,无网络依赖
 
 ontokb ingest "https://www.youtube.com/watch?v=..."   # 单条端到端
 ontokb queue                                          # 批量入队
@@ -39,6 +55,24 @@ ontokb api                                            # 启动 SQLite graph 查�
 
 默认使用 OpenAI/ChatGPT,需要 `OPENAI_API_KEY`。模型默认 `gpt-5.5`,可用 `ONTOKB_MODEL` 覆盖。
 YouTube 字幕或本地 Whisper 转写会缓存到 `data/transcripts/youtube/`,后续同一视频优先复用缓存。
+
+## 启动前端 UI
+
+前端是生成在 vault 中的单文件页面。先启动后端（查询与 Chat 共用这个服务）：
+
+```bash
+cd /Users/zhangdapeng/Desktop/obsidianKB/obsidianprojFable
+export OPENAI_API_KEY="你的 API Key"
+ontokb api --host 127.0.0.1 --port 8765
+```
+
+再开一个终端，用 macOS 的 `open` 命令启动前端：
+
+```bash
+open "file:///Users/zhangdapeng/Desktop/obsidianKB/obsidianprojFable/vault/Knowledge%20Graph.html"
+```
+
+右侧“查询”用于直接查看实体和一跳关系；“Chat”会调用 `POST /api/chat`。查询和 Chat 都可选择按词/全文匹配、是否扩展相关词以及 `Top K`（1–200）；Chat 只会把该策略命中的有限 KG 上下文交给 LLM。API Key 只保留在后端环境中。左右区域之间的分隔线可拖动调整比例，双击可恢复默认宽度。图谱数据更新后，运行 `ontokb visualize` 重新生成此 HTML。
 
 ## Graph 查询 API
 
@@ -73,6 +107,7 @@ triple_id	关系
 - `GET /health`
 - `GET /api/entities/search?q=<关键词>&mode=terms|phrase&expand=0|1&limit=50`
 - `GET /api/graph/query?q=<关键词>&mode=terms|phrase&expand=0|1&limit=50&format=json|table`
+- `POST /api/chat`，JSON body: `{"question": "Codex 使用了什么技术？", "mode": "terms", "expand": true, "top": 20}`
 
 `mode=phrase&expand=1` 会先匹配完整短语,再用短语里的词扩展命中节点;`expand=0` 是严格短语匹配。
 
