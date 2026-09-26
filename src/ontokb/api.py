@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -26,12 +26,20 @@ def run_api(
     graph = GraphStore(db_path)
 
     class Handler(GraphApiHandler):
-        store = graph
+        def setup(self):
+            super().setup()
+            self.store = GraphStore(db_path)
+
+        def finish(self):
+            try:
+                super().finish()
+            finally:
+                self.store.close()
         llm_provider = provider
         llm_model = model
         llm_fallback_model = fallback_model
 
-    server = HTTPServer((host, port), Handler)
+    server = ThreadingHTTPServer((host, port), Handler)
     try:
         server.serve_forever()
     finally:
@@ -48,19 +56,35 @@ class GraphApiHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         try:
-            if parsed.path == "/health":
+            if parsed.path == "/":
+                from .visualize import graph_data, render_html
+                payload = render_html(graph_data(self.store), "OntoKB · 日常知识库").encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            elif parsed.path == "/health":
                 provider = (os.environ.get("ONTOKB_LLM_PROVIDER") or self.llm_provider or "openai").lower()
+                from .codex_backend import executable
                 key_name = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
                 self._send_json({
                     "ok": True,
+                    "app_id": "ontokb",
+                    "ui_version": "reading-v1",
+                    "features": {"article_summary": True, "summary_walk": True},
                     "chat": True,
                     "llm_provider": provider,
-                    "llm_configured": bool(os.environ.get(key_name)),
+                    "llm_configured": bool(executable()) if provider == "codex" else bool(os.environ.get(key_name)),
                 })
             elif parsed.path == "/api/entities/search":
                 self._handle_entity_search(params)
             elif parsed.path == "/api/graph/query":
                 self._handle_graph_query(params)
+            elif parsed.path == "/api/reading":
+                from .visualize import graph_data
+                self._send_json(graph_data(self.store))
             else:
                 self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except ValueError as exc:
@@ -68,9 +92,24 @@ class GraphApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        origin = self.headers.get('Origin')
+        if origin and origin != 'null':
+            source = urlparse(origin)
+            if source.hostname not in {'localhost', '127.0.0.1', '::1'} or source.port != self.server.server_port:
+                self._send_json({'error': '仅允许本机 UI 发起操作'}, HTTPStatus.FORBIDDEN)
+                return
+        if self.headers.get_content_type() != 'application/json':
+            self._send_json({'error': 'Content-Type must be application/json'}, HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+            return
         try:
             if parsed.path == "/api/chat":
                 self._handle_chat()
+            elif parsed.path == "/api/articles":
+                from .reading import ingest_article
+                result = ingest_article(self.store, self._read_json(max_bytes=650_000),
+                                        provider=self.llm_provider, model=self.llm_model,
+                                        fallback_model=self.llm_fallback_model)
+                self._send_json(result)
             else:
                 self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except ValueError as exc:
@@ -134,25 +173,36 @@ class GraphApiHandler(BaseHTTPRequestHandler):
         if top < 1 or top > 200:
             raise ValueError("top must be between 1 and 200")
 
-        self._send_json(_chat_response(
-            self.store,
-            question,
-            mode=mode,
-            expand=expand,
-            top=top,
-            provider=self.llm_provider,
-            model=self.llm_model,
-            fallback_model=self.llm_fallback_model,
-        ))
+        from .assistant import respond
+        options = dict(mode=mode, expand=expand, top=top, provider=self.llm_provider,
+                       model=self.llm_model, fallback_model=self.llm_fallback_model)
+        if body.get("stream") is True:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self._send_cors_headers()
+            self.end_headers()
+            def emit(event):
+                self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
+                self.wfile.flush()
+            try:
+                result = respond(self.store, question, progress=lambda text: emit({"status": text}), **options)
+                emit({"result": result})
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            except Exception as exc:
+                emit({"error": str(exc)})
+        else:
+            self._send_json(respond(self.store, question, **options))
 
-    def _read_json(self) -> dict:
+    def _read_json(self, max_bytes: int = 64_000) -> dict:
         raw_length = self.headers.get("Content-Length", "0")
         try:
             length = int(raw_length)
         except ValueError as exc:
             raise ValueError("invalid Content-Length") from exc
-        if length < 1 or length > 64_000:
-            raise ValueError("request body must be between 1 and 64000 bytes")
+        if length < 1 or length > max_bytes:
+            raise ValueError(f"request body must be between 1 and {max_bytes} bytes")
         try:
             body = json.loads(self.rfile.read(length))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

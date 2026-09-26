@@ -71,7 +71,7 @@ def test_ingest_builds_document_tier(pipe):
     assert stats["document_links"] == 3
 
     doc = pipe.graph.get_entity("Agent 架构解析")
-    assert doc["type"] == "Content"
+    assert doc["type"] == "VideoObject"
     props = json.loads(doc["properties"])
     assert props["url"] == item.url
     assert props["source"] == "youtube"
@@ -171,7 +171,7 @@ def test_backfill_rebuilds_document_tier_for_old_data(pipe):
     assert stats == {"documents": 1, "links_added": 2}
 
     doc = g.get_entity("yt:old00000001")
-    assert doc["type"] == "Content"
+    assert doc["type"] == "VideoObject"
     assert json.loads(g.get_entity("OpenAI")["sources"]) == ["yt:old00000001"]
     edges = {(e["subject"], e["predicate"], e["object"])
              for e in g.related_graph("旧视频", mode="phrase")["edges"]}
@@ -180,3 +180,28 @@ def test_backfill_rebuilds_document_tier_for_old_data(pipe):
 
     # idempotent: second run adds nothing
     assert pipe.backfill_documents() == {"documents": 1, "links_added": 0}
+
+
+def test_about_reuses_real_entity_instead_of_retyping_as_topic(pipe):
+    payload = {**EXTRACTION, "topics": ["OpenAI"]}
+    item = ContentItem(id="yt:about", kind="video", source="youtube", url="https://example.org/video",
+                       title="Company analysis", raw_text="text")
+    pipe.ingest(item, client=_fake_openai_client(payload))
+    assert pipe.graph.get_entity("OpenAI")["type"] == "Organization"
+    edges = pipe.graph.related_graph("Company analysis", mode="phrase")["edges"]
+    assert any(e["predicate"] == "about" and e["object"] == "OpenAI" for e in edges)
+
+
+def test_conflicting_extraction_cannot_add_edges_to_rejected_identity(pipe):
+    from ontokb.models import ExtractedEntity
+    pipe.graph.upsert_entity(ExtractedEntity(name="OpenAI", type="Person"))
+    item = ContentItem(id="yt:conflict", kind="video", source="youtube", url="https://example.org/video",
+                       title="Conflict case", raw_text="text")
+    result = pipe.ingest(item, client=_fake_openai_client(EXTRACTION))
+    assert result["rejected"] == 2  # identity and its triple
+    assert pipe.graph.get_entity("OpenAI")["type"] == "Person"
+    assert not pipe.graph.related_graph("OpenAI", mode="phrase")["edges"]
+    meta = json.loads(pipe.graph.conn.execute("SELECT meta FROM contents WHERE id=?", (item.id,)).fetchone()[0])
+    assert len(meta["extraction_rejections"]) == 2
+    note = (pipe.vault.root / "Sources/Conflict case.md").read_text(encoding="utf-8")
+    assert "**develops**" not in note

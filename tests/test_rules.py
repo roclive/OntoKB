@@ -16,8 +16,8 @@ def test_load_default_rules():
 def test_operator_matching_and_substitution():
     engine = RuleEngine.load(ROOT / "rules" / "default.yaml")
     facts = [
-        {"kind": "entity", "name": "AI agents", "type": "Topic", "degree": 7},
-        {"kind": "entity", "name": "cold topic", "type": "Topic", "degree": 1},
+        {"kind": "entity", "name": "AI agents", "type": "DefinedTerm", "degree": 7},
+        {"kind": "entity", "name": "cold topic", "type": "DefinedTerm", "degree": 1},
     ]
     actions = engine.run(facts)
     wiki = [a for a in actions if a.action == "create_wiki_page"]
@@ -27,7 +27,7 @@ def test_operator_matching_and_substitution():
 
 def test_chaining_wiki_to_report():
     engine = RuleEngine.load(ROOT / "rules" / "default.yaml")
-    facts = [{"kind": "entity", "name": "端侧 AI", "type": "Topic", "degree": 5}]
+    facts = [{"kind": "entity", "name": "端侧 AI", "type": "DefinedTerm", "degree": 5}]
     actions = engine.run(facts)
     names = [(a.rule, a.action) for a in actions]
     assert ("hot-topic-wiki", "create_wiki_page") in names
@@ -37,7 +37,7 @@ def test_chaining_wiki_to_report():
 
 def test_dedup_no_double_fire():
     engine = RuleEngine.load(ROOT / "rules" / "default.yaml")
-    facts = [{"kind": "entity", "name": "X", "type": "Topic", "degree": 9}]
+    facts = [{"kind": "entity", "name": "X", "type": "DefinedTerm", "degree": 9}]
     actions = engine.run(facts)
     keys = [(a.action, tuple(sorted(a.params.items()))) for a in actions]
     assert len(keys) == len(set(keys))
@@ -61,15 +61,15 @@ def test_guard_pattern_requires_existence():
     rules = [
         Rule(
             name="guarded",
-            patterns=[{"kind": "entity", "type": "Topic"},
+            patterns=[{"kind": "entity", "type": "DefinedTerm"},
                       {"kind": "content", "relevance": {"gte": 0.5}}],
             actions=[{"action": "noop", "with": {"who": "$name"}}],
         )
     ]
     engine = RuleEngine(rules=rules)
-    assert engine.run([{"kind": "entity", "type": "Topic", "name": "t"}]) == []
+    assert engine.run([{"kind": "entity", "type": "DefinedTerm", "name": "t"}]) == []
     fired = engine.run([
-        {"kind": "entity", "type": "Topic", "name": "t"},
+        {"kind": "entity", "type": "DefinedTerm", "name": "t"},
         {"kind": "content", "relevance": 0.8},
     ])
     assert [a.params for a in fired] == [{"who": "t"}]

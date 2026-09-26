@@ -28,7 +28,7 @@ class Property(BaseModel):
 
 class ExtractedEntity(BaseModel):
     name: str = Field(description="Canonical entity name")
-    type: str = Field(description="Ontology class, e.g. Person / Organization / Technology / Topic / Claim")
+    type: str = Field(description="Schema.org profile class, e.g. Person / Organization / DefinedTerm / SoftwareApplication / Claim")
     aliases: list[str] = Field(default_factory=list)
     properties: dict[str, str] = Field(default_factory=dict)
 

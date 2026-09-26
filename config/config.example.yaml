@@ -23,8 +23,8 @@ sources:
     keywords: []                # reserved for column crawling (M1)
 
 llm:
-  provider: openai
-  model: gpt-5.5
+  provider: codex
+  model: null  # inherit the local Codex model; set explicitly for API providers
   fallback_model: claude-opus-4-8
   output_language: Simplified Chinese
 

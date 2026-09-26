@@ -25,5 +25,8 @@ ontokb = "ontokb.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+ontokb = ["web/*.html", "web/*.css", "web/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

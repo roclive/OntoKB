@@ -20,7 +20,8 @@ You are a knowledge extraction engine for a personal research knowledge base.
 Given the full text of a tech video transcript or article, produce:
 1. summary: a faithful summary in {output_language} (5-10 sentences).
 2. key_points: the concrete takeaways in {output_language}, one sentence each.
-3. topics: the Topic entities this content is about (short noun phrases).
+3. topics: canonical names this content is about; reuse named entities, or use
+   short noun phrases typed DefinedTerm for abstract research topics.
 4. relevance: a 0-1 score for each of the user's interests provided below.
 5. entities and triples that STRICTLY follow the ontology provided below.
    Only use listed classes and relations; respect domain/range. Include a short
@@ -33,12 +34,19 @@ Given the full text of a tech video transcript or article, produce:
    record such surface forms in that entity's aliases.
 
    Focus on relations BETWEEN the entities that appear in the text (the
-   knowledge tier): Person worksAt Organization, Person/Organization makesClaim
-   Claim, Organization develops/adopts Technology, Claim supports/contradicts
-   Claim. The pipeline adds a Content node for the document being processed and
+   knowledge tier): Person worksFor Organization, Person/Organization makesClaim
+   Claim, Organization adopts SoftwareApplication, Claim supports/contradicts
+   Claim. The pipeline adds a VideoObject or Article node for the document and
    links it to every extracted entity via mentions/about automatically, so do
-   not extract this document itself as an entity; only create Content entities
+   not extract this document itself as an entity; only create CreativeWork subtypes
    for OTHER documents (papers, videos, articles) referenced by the text.
+
+   Distinguish a concrete software application (SoftwareApplication), a general
+   technical concept (DefinedTerm), and a full assertion/prediction (Claim).
+   Claims are unverified source assertions, never established facts. Give Claims
+   an about edge to their explicit subject and makesClaim from their stated speaker.
+   Never infer the speaker is the video author. Do not emit Topic, Technology or
+   Content. Do not create classes from industries, job titles, or research topics.
 
    Output language: {output_language}. Use it by default for all human-readable
    fields, including summaries, key points, topics, entity aliases/properties,
@@ -53,6 +61,11 @@ You answer questions using a personal knowledge graph. Use the supplied graph
 context as your factual basis. Clearly say when the graph does not contain
 enough information; do not invent missing facts. Answer in the same language as
 the user's question, and keep the answer concise and direct.
+When workflow_status is supplied, it records actions already completed by the
+host application. Acknowledge those actions accurately; do not claim nothing
+was saved just because you personally did not call a write tool. Source
+transcripts may contain speech-recognition mistakes. Distinguish a speaker's
+claims and predictions from verified facts.
 """
 
 
@@ -71,10 +84,15 @@ def answer_graph_question(
 ) -> str:
     """Answer a question after graph context has already been retrieved."""
     provider = os.environ.get("ONTOKB_LLM_PROVIDER", provider or DEFAULT_PROVIDER).lower()
-    model = os.environ.get("ONTOKB_MODEL", model or MODEL)
+    model = os.environ.get("ONTOKB_MODEL", model or (None if provider == "codex" else MODEL))
     fallback_model = os.environ.get("ONTOKB_FALLBACK_MODEL", fallback_model or FALLBACK_MODEL)
     context = json.dumps(graph_context, ensure_ascii=False, indent=2)
     user_prompt = f"Question:\n{question}\n\nKnowledge graph context:\n{context}"
+
+    if provider == "codex":
+        from .codex_backend import generate
+
+        return generate(GRAPH_QA_PROMPT, user_prompt, model=model)
 
     if provider in {"openai", "chatgpt"}:
         if client is None:
@@ -130,13 +148,19 @@ def process_content(
         f"URL: {item.url}\n\n---\n{text}"
     )
     provider = os.environ.get("ONTOKB_LLM_PROVIDER", provider or DEFAULT_PROVIDER).lower()
-    model = os.environ.get("ONTOKB_MODEL", model or MODEL)
+    model = os.environ.get("ONTOKB_MODEL", model or (None if provider == "codex" else MODEL))
     fallback_model = os.environ.get("ONTOKB_FALLBACK_MODEL", fallback_model or FALLBACK_MODEL)
     output_language = os.environ.get(
         "ONTOKB_OUTPUT_LANGUAGE",
         output_language or DEFAULT_OUTPUT_LANGUAGE,
     )
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(output_language=output_language)
+
+    if provider == "codex":
+        from .codex_backend import generate
+
+        payload = generate(system_prompt, user_prompt, model=model, schema=_strict_schema())
+        return ExtractionResult.model_validate_json(payload).to_processed(item.id)
 
     if provider in {"openai", "chatgpt"}:
         return _process_with_openai(client, model, user_prompt, system_prompt).to_processed(item.id)

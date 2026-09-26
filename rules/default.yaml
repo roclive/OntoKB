@@ -8,11 +8,11 @@ max_iterations: 10
 
 rules:
   - name: hot-topic-wiki
-    comment: A Topic mentioned by 5+ contents gets its own wiki page.
+    comment: A DefinedTerm with 5+ incident triples gets its own wiki page.
     when:
       all:
         - kind: entity
-          type: Topic
+          type: DefinedTerm
           degree: {gte: 5}
     then:
       - action: create_wiki_page

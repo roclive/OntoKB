@@ -5,6 +5,8 @@ __pycache__/
 venv/
 data/*.db
 data/audio/
+data/backups/
+data/*.log
 .pytest_cache/
 .env
 config/config.yaml

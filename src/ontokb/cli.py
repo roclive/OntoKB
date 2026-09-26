@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -46,6 +48,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("rules")
     sub.add_parser("queue")
     sub.add_parser("backfill")
+    p_migrate = sub.add_parser("migrate-ontology", help="preview or apply the Schema.org profile migration")
+    p_migrate.add_argument("--apply", action="store_true", help="back up, migrate, and regenerate vault projections")
+    p_migrate.add_argument("--report", default="data/ontology-migration-report.json")
+    p_migrate.add_argument("--overrides", default="ontology/migration-v2.yaml")
+    p_export = sub.add_parser("export-jsonld")
+    p_export.add_argument("--out", default="data/knowledge-graph.jsonld")
     p_api = sub.add_parser("api")
     p_api.add_argument("--host", default="127.0.0.1")
     p_api.add_argument("--port", type=int, default=8765)
@@ -59,7 +67,44 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     pipe = Pipeline()
 
-    if args.cmd == "status":
+    if args.cmd == "migrate-ontology":
+        from .migration import load_overrides, migrate_graph, export_jsonld
+        from datetime import datetime, timezone
+        backup_dir = ROOT / "data/backups"
+        vault_backup = None
+        if args.apply:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            vault_backup = shutil.make_archive(str(backup_dir / f"vault-before-schema-v2-{stamp}"),
+                                               "zip", pipe.vault.root)
+        result = migrate_graph(pipe.graph, pipe.ontology, backup_dir,
+                               load_overrides(_resolve(args.overrides)), apply=args.apply)
+        if vault_backup:
+            result["vault_backup"] = vault_backup
+        report = _resolve(args.report)
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        if result["applied"]:
+            for row in pipe.graph.conn.execute("SELECT name FROM entities"):
+                pipe.vault.write_entity_note(pipe.graph, row["name"])
+            for note in (pipe.vault.root / "Sources").glob("*.md"):
+                lines = note.read_text(encoding="utf-8").splitlines(keepends=True)
+                for i, line in enumerate(lines):
+                    if line.startswith("- [["):
+                        for old, new in pipe.ontology.relation_aliases.items():
+                            line = line.replace(f"**{old}**", f"**{new}**")
+                        lines[i] = line
+                note.write_text("".join(lines), encoding="utf-8")
+            pipe.export_graph_html()
+            export_jsonld(pipe.graph, pipe.ontology, ROOT / "data/knowledge-graph.jsonld")
+        print(json.dumps({k: v for k, v in result.items() if k not in {"entities", "relations"}}, ensure_ascii=False, indent=2))
+        print(f"report: {report}")
+        if result["errors"]:
+            return 1
+    elif args.cmd == "export-jsonld":
+        from .migration import export_jsonld
+        print(export_jsonld(pipe.graph, pipe.ontology, _resolve(args.out)))
+    elif args.cmd == "status":
         print(pipe.status())
     elif args.cmd == "rules":
         actions = pipe.run_rules()

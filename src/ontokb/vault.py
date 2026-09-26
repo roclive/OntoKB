@@ -60,15 +60,22 @@ class ObsidianVault:
         row = graph.get_entity(name)
         if row is None:
             return None
+        props = json.loads(row["properties"])
         lines = [
             "---",
             f'entity: "{row["name"]}"',
             f"type: {row['type']}",
+            f"ontology_uri: {props.get('ontologyUri', '')}",
+            f"ontology_version: {props.get('ontologyVersion', '')}",
             "---",
             f"# {row['name']}",
             "",
             "## Relations",
         ]
+        if row["type"] == "Claim":
+            lines[8:8] = ["> 此节点记录来源论断，尚未独立事实核验。", ""]
+        if props.get("reviewStatus") == "needs_review":
+            lines[8:8] = ["> 分类待复核：" + props.get("reviewReason", "需更多身份资料"), ""]
         for rel in graph.neighbors(row["id"]):
             if rel["subject"] == row["name"]:
                 lines.append(f"- **{rel['predicate']}** → [[{slugify(rel['object'])}]]")

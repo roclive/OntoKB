@@ -39,13 +39,13 @@ class Pipeline:
         self.config = config or load_config()
         paths = self.config.get("paths", {})
         self.ontology = Ontology.load(ROOT / "ontology" / "core.yaml")
-        self.graph = GraphStore(ROOT / paths.get("db", "data/kb.db"))
+        self.graph = GraphStore(ROOT / paths.get("db", "data/kb.db"), ontology=self.ontology)
         self.vault = ObsidianVault(ROOT / paths.get("vault", "vault"))
         self.engine = RuleEngine.load(ROOT / "rules" / "default.yaml")
 
     # -- M2: content acquisition ------------------------------------------
 
-    def fetch(self, item: ContentItem) -> ContentItem:
+    def fetch(self, item: ContentItem, progress=None) -> ContentItem:
         if item.source == "youtube":
             from .sources.youtube import fetch_transcript
 
@@ -59,6 +59,7 @@ class Pipeline:
                 whisper_device=yt.get("whisper_device", "cpu"),
                 whisper_compute_type=yt.get("whisper_compute_type", "int8"),
                 cache_dir=ROOT / paths.get("transcripts", "data/transcripts") / "youtube",
+                **({"progress": progress} if progress is not None else {}),
             )
         elif item.source == "netease":
             from .sources.netease import fetch_article
@@ -99,35 +100,53 @@ class Pipeline:
         entity_types = {e.name: e.type for e in processed.entities}
         accepted, rejected = 0, 0
         accepted_entities: list[str] = []
+        rejected_names: set[str] = set()
+        rejection_details: list[dict] = []
+        validated_triples: list[ExtractedTriple] = []
         for entity in processed.entities:
             try:
                 self.ontology.validate_entity(entity.type)
+                self.graph.upsert_entity(entity, source=item.id, added_time=now)
             except OntologyError as exc:
                 log.warning("entity rejected: %s", exc)
                 rejected += 1
+                rejected_names.add(entity.name)
+                rejection_details.append({"kind": "entity", "name": entity.name, "error": str(exc)})
                 continue
-            self.graph.upsert_entity(entity, source=item.id, added_time=now)
             accepted_entities.append(entity.name)
         for triple in processed.triples:
             try:
+                if triple.subject in rejected_names or triple.object in rejected_names:
+                    raise OntologyError("triple references a rejected entity")
                 if self.graph.add_triple(triple, self.ontology, source=item.id,
                                          entity_types=entity_types, created_at=now):
                     accepted += 1
+                validated_triples.append(triple.model_copy(update={
+                    "predicate": self.ontology.canonical_relation(triple.predicate)}))
             except (OntologyError, ValueError) as exc:
                 log.warning("triple rejected: %s", exc)
                 rejected += 1
+                rejection_details.append({"kind": "triple", "subject": triple.subject,
+                                          "predicate": triple.predicate, "object": triple.object,
+                                          "error": str(exc)})
 
-        doc_links = self._link_document(item, processed.topics, accepted_entities, now)
+        doc_links = self._link_document(item, [t for t in processed.topics if t not in rejected_names], accepted_entities, now)
 
         self.graph.upsert_content(
             item.id, item.kind, item.source, item.url, item.title,
             status="processed",
             meta={"relevance": processed.relevance, "summary": processed.summary,
-                  "added_time": now},
+                  "added_time": now, "key_points": processed.key_points,
+                  "extraction_rejections": rejection_details,
+                  **({"raw_text": item.raw_text} if item.kind == "article" else {})},
         )
-        self.vault.write_content_note(item, processed)
-        for entity in processed.entities:
-            self.vault.write_entity_note(self.graph, entity.name)
+        # Source notes project accepted knowledge, not rejected raw model output.
+        self.vault.write_content_note(item, processed.model_copy(update={
+            "triples": validated_triples,
+            "topics": [t for t in processed.topics if t not in rejected_names],
+        }))
+        for name in accepted_entities:
+            self.vault.write_entity_note(self.graph, name)
         return {"content_id": item.id, "triples_accepted": accepted,
                 "rejected": rejected, "document_links": doc_links}
 
@@ -150,7 +169,7 @@ class Pipeline:
             properties["published_at"] = item.published_at
         doc = ExtractedEntity(
             name=item.title or item.id,
-            type="Content",
+            type="VideoObject" if item.kind == "video" else "Article",
             aliases=[item.id],  # stable handle even if the title changes
             properties=properties,
         )
@@ -159,8 +178,12 @@ class Pipeline:
         linked = 0
         seen_ids = {doc_id}
         for topic in dict.fromkeys(topics):
-            self.graph.upsert_entity(ExtractedEntity(name=topic, type="Topic"),
-                                     source=item.id, added_time=now)
+            # Topic is a role (about target), not a competing entity type.
+            # A document can be about OpenAI without retyping it as a concept.
+            existing = self.graph.get_entity(topic)
+            self.graph.upsert_entity(ExtractedEntity(
+                name=topic, type=existing["type"] if existing else "DefinedTerm"),
+                source=item.id, added_time=now)
             linked += self._link_doc_edge(doc.name, "about", topic, item.id, now, seen_ids)
         for name in dict.fromkeys(entity_names):
             linked += self._link_doc_edge(doc.name, "mentions", name, item.id, now, seen_ids)

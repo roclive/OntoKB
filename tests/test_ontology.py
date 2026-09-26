@@ -13,7 +13,9 @@ def onto():
 
 
 def test_loads_classes_and_relations(onto):
-    assert "Topic" in onto.classes
+    assert "DefinedTerm" in onto.classes
+    assert "Topic" not in onto.classes
+    assert onto.canonical_class("Topic") == "DefinedTerm"
     assert "mentions" in onto.relations
     assert onto.relations["contradicts"].symmetric
 

@@ -88,17 +88,23 @@ def fetch_transcript(
     whisper_device: str = "cpu",
     whisper_compute_type: str = "int8",
     cache_dir: str | Path | None = None,
+    progress=None,
 ) -> str:
     """Fetch official or auto captions for a video and return plain text.
     Falls back to local faster-whisper transcription when captions are absent.
     """
     cached = _read_cached_transcript(item, cache_dir)
     if cached:
+        if progress:
+            progress('已读取缓存文字稿。')
         return cached
 
     import yt_dlp
 
     opts = {
+        "js_runtimes": {"node": {}},
+        "noplaylist": True,
+        "socket_timeout": 30,
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
@@ -111,6 +117,7 @@ def fetch_transcript(
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(item.url, download=False)
         item.title = item.title or info.get("title", "")
+        item.duration_seconds = int(info.get("duration") or 0) or None
         subs = {**(info.get("subtitles") or {}), **(info.get("automatic_captions") or {})}
         for lang in langs:
             tracks = subs.get(lang)
@@ -119,7 +126,7 @@ def fetch_transcript(
             vtt = next((t for t in tracks if t.get("ext") == "vtt"), tracks[0])
             import urllib.request
 
-            with urllib.request.urlopen(vtt["url"]) as resp:
+            with urllib.request.urlopen(vtt["url"], timeout=30) as resp:
                 text = vtt_to_text(resp.read().decode("utf-8", errors="replace"))
                 _write_cached_transcript(item, text, cache_dir, source=f"caption:{lang}")
                 return text
@@ -130,6 +137,7 @@ def fetch_transcript(
         language=whisper_language,
         device=whisper_device,
         compute_type=whisper_compute_type,
+        progress=progress,
     )
     _write_cached_transcript(item, text, cache_dir, source=f"faster-whisper:{whisper_model}")
     return text
@@ -182,6 +190,8 @@ def _download_audio(item: ContentItem, target_dir: Path, cookies_file: str | Non
     import yt_dlp
 
     opts = {
+        "js_runtimes": {"node": {}},
+        "socket_timeout": 30,
         "format": "bestaudio/best",
         "outtmpl": str(target_dir / "%(id)s.%(ext)s"),
         "quiet": True,
@@ -208,6 +218,7 @@ def _transcribe_with_whisper(
     language: str | None = DEFAULT_WHISPER_LANGUAGE,
     device: str = "cpu",
     compute_type: str = "int8",
+    progress=None,
 ) -> str:
     try:
         from faster_whisper import WhisperModel
@@ -218,7 +229,11 @@ def _transcribe_with_whisper(
 
     language = _normalize_whisper_language(language)
     with tempfile.TemporaryDirectory(prefix="ontokb-youtube-") as tmp:
+        if progress:
+            progress('未找到字幕，正在下载音频…')
         audio_path = _download_audio(item, Path(tmp), cookies_file=cookies_file)
+        if progress:
+            progress('音频已下载，正在加载本地转写模型（首次运行需下载模型）…')
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
         segments, info = model.transcribe(
             str(audio_path),
@@ -227,7 +242,16 @@ def _transcribe_with_whisper(
         )
         if getattr(info, "duration", None) and not item.duration_seconds:
             item.duration_seconds = int(info.duration)
-        lines = [segment.text.strip() for segment in segments if segment.text.strip()]
+        lines = []
+        last_minute = -1
+        for segment in segments:
+            if segment.text.strip():
+                lines.append(segment.text.strip())
+            minute = int(getattr(segment, 'end', 0) / 60)
+            if progress and minute != last_minute:
+                total = (item.duration_seconds or 0) / 60
+                progress(f'本地转写：已处理 {minute} / {total:.0f} 分钟音频…')
+                last_minute = minute
 
     if not lines:
         raise RuntimeError(f"Whisper produced no transcript for {item.url}")

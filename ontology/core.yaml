@@ -1,84 +1,142 @@
-# Core ontology for the watch-later research knowledge base.
-# LLM extraction output must validate against this schema before entering the graph.
-version: 1
-
+# Schema.org research profile. Domain/range constraints are local policy.
+version: 2
+model: Schema.org
+reference: https://schema.org/docs/datamodel.html
+reviewed_at: '2026-09-26'
+class_aliases: {Content: CreativeWork, Topic: DefinedTerm, Technology: DefinedTerm}
+relation_aliases: {worksAt: worksFor, authoredBy: author, publishedBy: publisher}
 classes:
-  Thing: {}
-  Content:
-    parent: Thing
-    properties: [title, url, source, published_at, kind]   # kind: video | article
+  Thing:
+    uri: https://schema.org/Thing
+    description: 未能可靠判断类型的对象，仅作待复核兜底；不得把预测或话题放在这里。
   Person:
     parent: Thing
-    properties: [role]
+    uri: https://schema.org/Person
+    description: 具体自然人；职业是属性，AI 员工不是自然人。
   Organization:
     parent: Thing
-    properties: [industry]
-  Technology:
-    parent: Thing
-    properties: [category, maturity]
+    uri: https://schema.org/Organization
+    description: 公司、机构、团队等组织；与其产品区分。
   Product:
     parent: Thing
-    properties: [vendor]
-  Topic:
+    uri: https://schema.org/Product
+    description: 可识别的具体产品；命名软件优先 SoftwareApplication，产品类别用 DefinedTerm。
+  DefinedTerm:
     parent: Thing
-    properties: []
+    uri: https://schema.org/DefinedTerm
+    description: 可复用的概念、技术原理、研究主题或类别，使用短名词短语；不能是完整论断或具体产品。
+    properties: [description, termCategory]
   Event:
     parent: Thing
-    properties: [date, location]
-  Claim:
+    uri: https://schema.org/Event
+    description: 有具体时间地点的事件；尚未发生的预测应记为 Claim。
+  CreativeWork:
     parent: Thing
-    properties: [statement, stance]
-
+    uri: https://schema.org/CreativeWork
+    description: 具体作品，只有无法细分为视频、文章、书籍或软件时才直接用此类。
+  MediaObject:
+    parent: CreativeWork
+    uri: https://schema.org/MediaObject
+    description: 媒体对象的中间父类；视频使用 VideoObject。
+  VideoObject:
+    parent: MediaObject
+    uri: https://schema.org/VideoObject
+    description: 具体视频，不是视频中的人物、公司或观点。
+  Article:
+    parent: CreativeWork
+    uri: https://schema.org/Article
+    description: 具体文章。
+  Book:
+    parent: CreativeWork
+    uri: https://schema.org/Book
+    description: 具体书籍；不能仅因被视频提及而归为视频。
+  SoftwareApplication:
+    parent: CreativeWork
+    uri: https://schema.org/SoftwareApplication
+    description: 可识别的命名软件或应用，如 FSD；Transformer 架构是 DefinedTerm。
+  Claim:
+    parent: CreativeWork
+    uri: https://schema.org/Claim
+    description: 某来源提出的完整断言、判断或预测，必须保留出处；入库不代表已验证为事实。
+    properties: [text, verificationStatus]
 relations:
   mentions:
-    domain: Content
+    uri: https://schema.org/mentions
+    domain: CreativeWork
     range: Thing
+    description: 作品提及对象，不代表支持该观点。
   about:
-    domain: Content
-    range: Topic
-  authoredBy:
-    domain: Content
-    range: Person
-  publishedBy:
-    domain: Content
-    range: Organization
-  worksAt:
+    uri: https://schema.org/about
+    domain: CreativeWork
+    range: Thing
+    description: 作品或论断讨论的对象，可为人物、组织、软件或术语。
+  author:
+    uri: https://schema.org/author
+    domain: CreativeWork
+    range: [Person, Organization]
+    description: 作者；不能把采访对象自动当成视频作者。
+  publisher:
+    uri: https://schema.org/publisher
+    domain: CreativeWork
+    range: [Person, Organization]
+  worksFor:
+    uri: https://schema.org/worksFor
     domain: Person
     range: Organization
+  citation:
+    uri: https://schema.org/citation
+    domain: CreativeWork
+    range: CreativeWork
+    description: 必须有明确引用证据。
   develops:
+    uri: urn:ontokb:ontology:develops
     domain: Organization
-    range: Technology
+    range: [DefinedTerm, SoftwareApplication, Product]
+    description: 本地扩展；来源明确声称开发，不能把采用技术当成开发。
   adopts:
+    uri: urn:ontokb:ontology:adopts
     domain: Organization
-    range: Technology
+    range: [DefinedTerm, SoftwareApplication, Product]
   makes:
+    uri: urn:ontokb:ontology:makes
     domain: Organization
-    range: Product
+    range: [Product, SoftwareApplication]
   uses:
-    domain: Product
-    range: Technology
+    uri: urn:ontokb:ontology:uses
+    domain: [Product, SoftwareApplication]
+    range: [DefinedTerm, SoftwareApplication, Product]
   competesWith:
+    uri: urn:ontokb:ontology:competesWith
     domain: Organization
     range: Organization
     symmetric: true
   relatedTo:
+    uri: urn:ontokb:ontology:relatedTo
     domain: Thing
     range: Thing
     symmetric: true
+    description: 仅在来源明确关联且无更精确关系时使用；主题相同不等于实体相同。
   participatesIn:
-    domain: Thing
+    uri: urn:ontokb:ontology:participatesIn
+    domain: [Person, Organization]
     range: Event
   doesNotParticipateIn:
-    domain: Thing
+    uri: urn:ontokb:ontology:doesNotParticipateIn
+    domain: [Person, Organization]
     range: Event
+    description: 必须有明确否定证据，缺失参与关系不能推断不参与。
   makesClaim:
-    # widened from Content so claims attach to the person/org who made them
-    domain: Thing
+    uri: urn:ontokb:ontology:makesClaim
+    domain: [Person, Organization, CreativeWork]
     range: Claim
+    description: 说话者或来源提出论断；本地扩展，不是 Schema.org 官方属性。
   supports:
+    uri: urn:ontokb:ontology:supports
     domain: Claim
     range: Claim
+    description: 必须明确支持，不能因两论断同时出现而推断。
   contradicts:
+    uri: urn:ontokb:ontology:contradicts
     domain: Claim
     range: Claim
     symmetric: true

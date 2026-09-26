@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from .models import ExtractedEntity, ExtractedTriple
-from .ontology import Ontology
+from .ontology import Ontology, OntologyError
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS entities (
@@ -109,7 +109,8 @@ def normalize(name: str) -> str:
 
 
 class GraphStore:
-    def __init__(self, path: str | Path = ":memory:"):
+    def __init__(self, path: str | Path = ":memory:", ontology: Ontology | None = None):
+        self.ontology = ontology or Ontology.load(Path(__file__).resolve().parents[2] / "ontology/core.yaml")
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path))
@@ -146,15 +147,54 @@ class GraphStore:
         merged entities keep provenance from every document that mentioned them.
         `added_time` is kept from the first sighting.
         """
+        incoming_type = self.ontology.canonical_class(entity.type)
+        self.ontology.validate_entity(incoming_type)
         norm = normalize(entity.name)
+        if not norm:
+            raise OntologyError("entity name must not be empty")
         row = self._resolve(norm)
+        properties = dict(entity.properties)
+        if incoming_type == "Claim":
+            properties.setdefault("text", entity.name)
+            # An extraction confidence is not a fact-check verdict.
+            properties["verificationStatus"] = "unverified"
+        if entity.type in {"Technology", "Topic"}:
+            properties.setdefault("termCategory", "technology" if entity.type == "Technology" else "research_topic")
+        # A shared alias is not sufficient evidence to merge distinct identities.
+        for alias in entity.aliases:
+            owner = self._resolve(normalize(alias))
+            if owner is not None and (row is None or owner["id"] != row["id"]):
+                raise OntologyError(f"alias conflict: {alias!r} already belongs to {owner['name']!r}")
+        stored_type = incoming_type
+        if row is not None:
+            current = self.ontology.canonical_class(row["type"])
+            if self.ontology.is_subclass(current, incoming_type):
+                stored_type = current  # Never widen a known type to Thing.
+            elif self.ontology.is_subclass(incoming_type, current):
+                stored_type = incoming_type
+            else:
+                raise OntologyError(f"type conflict for {entity.name!r}: {current} / {incoming_type}")
+            for edge in self.conn.execute(
+                "SELECT t.*, s.type AS st, o.type AS ot FROM triples t "
+                "JOIN entities s ON s.id=t.subject_id JOIN entities o ON o.id=t.object_id "
+                "WHERE t.subject_id=? OR t.object_id=?", (row["id"], row["id"])
+            ):
+                self.ontology.validate_triple(
+                    stored_type if edge["subject_id"] == row["id"] else edge["st"],
+                    edge["predicate"],
+                    stored_type if edge["object_id"] == row["id"] else edge["ot"],
+                )
+        properties["ontologyUri"] = self.ontology.classes[stored_type].get("uri", "")
+        properties["ontologyVersion"] = str(self.ontology.version)
+        if stored_type == "Thing":
+            properties["reviewStatus"] = "needs_review"
         if row is None:
             cur = self.conn.execute(
                 "INSERT INTO entities (name, norm_name, type, aliases, properties, sources, added_time) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (entity.name, norm, entity.type,
+                (entity.name, norm, stored_type,
                  json.dumps(entity.aliases, ensure_ascii=False),
-                 json.dumps(entity.properties, ensure_ascii=False),
+                 json.dumps(properties, ensure_ascii=False),
                  json.dumps([source] if source else [], ensure_ascii=False),
                  added_time),
             )
@@ -164,16 +204,16 @@ class GraphStore:
             aliases = set(json.loads(row["aliases"]))
             aliases.update(entity.aliases)
             props = json.loads(row["properties"])
-            props.update(entity.properties)
+            props.update(properties)
             sources = list(json.loads(row["sources"]))
             if source and source not in sources:
                 sources.append(source)
             self.conn.execute(
-                "UPDATE entities SET aliases=?, properties=?, sources=?, added_time=? WHERE id=?",
+                "UPDATE entities SET aliases=?, properties=?, sources=?, added_time=?, type=? WHERE id=?",
                 (json.dumps(sorted(aliases), ensure_ascii=False),
                  json.dumps(props, ensure_ascii=False),
                  json.dumps(sources, ensure_ascii=False),
-                 row["added_time"] or added_time, eid),
+                 row["added_time"] or added_time, stored_type, eid),
             )
         for alias in entity.aliases:
             self.conn.execute(
@@ -345,14 +385,13 @@ class GraphStore:
     ) -> bool:
         """Validate against the ontology and insert. Returns False on duplicate.
 
-        entity_types maps entity name -> class for entities in the same batch;
-        falls back to the stored type for already-known entities.
+        Validate the actual persisted types. entity_types is retained only for
+        call compatibility and cannot override database types.
         """
         subj = self.get_entity(triple.subject)
         obj = self.get_entity(triple.object)
-        types = entity_types or {}
-        subj_type = types.get(triple.subject) or (subj["type"] if subj else None)
-        obj_type = types.get(triple.object) or (obj["type"] if obj else None)
+        subj_type = subj["type"] if subj else None
+        obj_type = obj["type"] if obj else None
         if subj is None or obj is None or subj_type is None or obj_type is None:
             raise ValueError(f"triple references unknown entity: {triple.subject!r} / {triple.object!r}")
         ontology.validate_triple(subj_type, triple.predicate, obj_type)
@@ -360,7 +399,7 @@ class GraphStore:
             self.conn.execute(
                 "INSERT INTO triples (subject_id, predicate, object_id, confidence, source, evidence, created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (subj["id"], triple.predicate, obj["id"], triple.confidence, source,
+                (subj["id"], ontology.canonical_relation(triple.predicate), obj["id"], triple.confidence, source,
                  triple.evidence, created_at),
             )
         except sqlite3.IntegrityError:

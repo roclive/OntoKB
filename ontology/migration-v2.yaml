@@ -1,0 +1,17 @@
+# Reviewed decisions for the current corpus, not universal name heuristics.
+entities:
+  FSD:
+    from: Technology
+    to: SoftwareApplication
+    reason: 原始转录讨论装有 FSD 的特斯拉及其驾驶能力，属于具体软件系统，不是技术类别。
+  技术革命与金融资本:
+    from: Content
+    to: Book
+    reason: 原始转录明确说“一本书叫做技术革命与金融资本”，旧属性也注明引用书籍。
+  River:
+    from: Thing
+    to: Thing
+    reason: 现有属性仅有标题中的“AI 员工”，不足以确认具体软件身份，保留待复核。
+    properties:
+      reviewStatus: needs_review
+      reviewReason: 仅标题提及 AI 员工，需正文或产品资料确认身份。

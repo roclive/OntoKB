@@ -80,7 +80,7 @@ def test_related_graph_returns_harness_agent_relations(graph):
             ExtractedEntity(name="Codex", type="Product"),
             ExtractedEntity(name="Claude Code", type="Product"),
             ExtractedEntity(name="harness agent", type="Technology", aliases=["代理脚手架", "agent工具链"]),
-            ExtractedEntity(name="AI agent 工具链", type="Topic", aliases=["agent工具链", "harness agent"]),
+            ExtractedEntity(name="AI agent 工具链", type="Topic", aliases=["harness agent 研究主题"]),
             ExtractedEntity(name="模型公司用agent工具链抢Palantir核心价值", type="Claim"),
             ExtractedEntity(name="Palantir的结果生意被token模式打破", type="Claim"),
         ]:
