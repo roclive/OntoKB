@@ -4,7 +4,43 @@ import pytest
 
 from ontokb.graph import GraphStore
 from ontokb.models import ExtractedEntity, ExtractedTriple
-from ontokb.reading import _mentioned, reading_library, ingest_article
+from ontokb.reading import _mentioned, article_categories, reading_library, ingest_article, set_article_category
+
+
+@pytest.mark.parametrize(('title', 'meta', 'expected'), [
+    ('他断送了中国最后的政改机会', {}, ['历史类']),
+    ('中国具身智能泡沫 | 935亿融资', {}, ['AI类', '经济类']),
+    ('我认为的泡沫是2029年', {}, ['经济类']),
+    ('Shopify如何用AI重构', {}, ['AI类']),
+    ('实验研究', {'topics': ['人工智能']}, ['实证类', 'AI类']),
+    ('日常随笔', {}, ['未分类']),
+    ('邮件 Mail', {}, ['未分类']),
+    ('AI', {'categories': [' 历史类 ', '历史类', None]}, ['历史类']),
+])
+def test_article_categories(title, meta, expected):
+    assert article_categories(title, meta) == expected
+
+
+def test_manual_category_persists_and_preserves_other_content(tmp_path):
+    path = tmp_path / 'categories.db'
+    g = GraphStore(path)
+    meta = {'summary': '人工智能的发展。', 'raw_text': '正文', 'topics': ['AI']}
+    for cid in ['a', 'b']:
+        g.upsert_content(cid, 'article', 'other', '', 'AI', status='processed', meta=meta)
+    for category in ['历史', '科技', '时政']:
+        assert set_article_category(g, {'content_id': 'a', 'category': category})['categories'] == [category]
+    g.close()
+    g = GraphStore(path)
+    docs = {d['id']: d for d in reading_library(g)}
+    assert docs['a']['categories'] == ['时政']
+    assert docs['b']['categories'] == ['AI类']
+    saved = json.loads(g.conn.execute("SELECT meta FROM contents WHERE id='a'").fetchone()[0])
+    assert saved == {**meta, 'categories': ['时政']}
+    for body in [{'content_id': 'a', 'category': []}, {'content_id': 'missing', 'category': '历史'},
+                 {'content_id': 'a', 'category': 'invalid'}]:
+        with pytest.raises(ValueError):
+            set_article_category(g, body)
+    g.close()
 
 
 def test_summary_walk_is_source_scoped_and_never_invents_edges():
@@ -60,6 +96,13 @@ def test_reading_http_endpoints_and_large_unicode_article(tmp_path, monkeypatch)
     try:
         with urlopen(origin+'/api/reading') as response:
             assert json.load(response)['library'][0]['steps'][0]['text'] == '摘要。'
+        request = Request(origin+'/api/reading/category',
+                          data=json.dumps({'content_id': 'a', 'category': '历史'}).encode(),
+                          headers={'Content-Type': 'application/json', 'Origin': origin})
+        with urlopen(request) as response:
+            assert json.load(response)['categories'] == ['历史']
+        with urlopen(origin+'/api/reading') as response:
+            assert json.load(response)['library'][0]['categories'] == ['历史']
         body = {'title': 'Long article', 'text': '正文内容。'*5000}
         request = Request(origin+'/api/articles', data=json.dumps(body, ensure_ascii=False).encode(),
                           headers={'Content-Type': 'application/json', 'Origin': origin})

@@ -12,3 +12,5 @@ data/*.log
 config/config.yaml
 vault/.obsidian/workspace*
 ~$*
+.playwright-cli/
+output/playwright/

@@ -52,3 +52,29 @@ def test_missing_binary(monkeypatch):
     monkeypatch.setattr(codex_backend, "executable", lambda: None)
     with pytest.raises(RuntimeError, match="Codex CLI"):
         codex_backend.generate("instructions", "prompt")
+
+
+@pytest.mark.parametrize('allowed',[True,False])
+def test_dynamic_tool_dispatch_and_failure_receipt(monkeypatch,allowed):
+    events=[{'id':1,'result':{}},{'id':2,'result':{'thread':{'id':'t'}}},
+            {'id':99,'method':'item/tool/call','params':{'tool':'kb_read' if allowed else 'shell','arguments':{'target':'doc'}}},
+            {'id':3,'result':{}},
+            {'method':'item/completed','params':{'item':{'type':'agentMessage','text':'done'}}},
+            {'method':'turn/completed','params':{'turn':{'status':'completed'}}}]
+    class Recording(io.StringIO):
+        def close(self): self.recorded=self.getvalue();super().close()
+    class Process:
+        stdin=Recording()
+        stdout=io.StringIO(''.join(json.dumps(e)+'\n' for e in events))
+        def poll(self): return None
+        def terminate(self): pass
+        def wait(self,**kw): return 0
+    proc=Process();calls=[]
+    monkeypatch.setattr(codex_backend,'executable',lambda:'codex')
+    monkeypatch.setattr(codex_backend.subprocess,'Popen',lambda *a,**kw:proc)
+    def handler(name,args): calls.append((name,args));return {'verified':True}
+    codex_backend.generate('instructions','prompt',dynamic_tools=[{'name':'kb_read'}],tool_handler=handler)
+    messages=[json.loads(s) for s in proc.stdin.recorded.splitlines()]
+    result=next(m['result'] for m in messages if m.get('id')==99)
+    assert result['success'] is allowed
+    assert bool(calls) is allowed

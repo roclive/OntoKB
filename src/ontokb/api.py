@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -48,6 +49,7 @@ def run_api(
 
 class GraphApiHandler(BaseHTTPRequestHandler):
     store: GraphStore
+    editor_vault_path: str | Path | None = None
     llm_provider: str | None = None
     llm_model: str | None = None
     llm_fallback_model: str | None = None
@@ -73,7 +75,9 @@ class GraphApiHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "app_id": "ontokb",
                     "ui_version": "reading-v1",
-                    "features": {"article_summary": True, "summary_walk": True},
+                    "features": {"article_summary": True, "summary_walk": True,
+                                 "transcript_validation": True, "chat_history": True, "knowledge_tools": True,
+                                 "knowledge_editor": True, "personal_memory": True, "judgment_comparison": True},
                     "chat": True,
                     "llm_provider": provider,
                     "llm_configured": bool(executable()) if provider == "codex" else bool(os.environ.get(key_name)),
@@ -85,6 +89,12 @@ class GraphApiHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/reading":
                 from .visualize import graph_data
                 self._send_json(graph_data(self.store))
+            elif parsed.path == "/api/editor":
+                from .editing import EditingService
+                self._send_json(EditingService(self.store).bootstrap())
+            elif parsed.path == "/api/memory":
+                from .memory import MemoryService
+                self._send_json(MemoryService(self.store).bootstrap())
             else:
                 self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except ValueError as exc:
@@ -102,8 +112,15 @@ class GraphApiHandler(BaseHTTPRequestHandler):
             self._send_json({'error': 'Content-Type must be application/json'}, HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
             return
         try:
-            if parsed.path == "/api/chat":
+            if parsed.path in ("/api/memory/review", "/api/memory/compare"):
+                self._handle_memory(parsed.path)
+            elif parsed.path.startswith("/api/editor/"):
+                self._handle_editor_mutation(parsed.path)
+            elif parsed.path == "/api/chat":
                 self._handle_chat()
+            elif parsed.path == "/api/reading/category":
+                from .reading import set_article_category
+                self._send_json(set_article_category(self.store, self._read_json()))
             elif parsed.path == "/api/articles":
                 from .reading import ingest_article
                 result = ingest_article(self.store, self._read_json(max_bytes=650_000),
@@ -115,7 +132,64 @@ class GraphApiHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
-            self._send_json({"error": f"LLM request failed: {exc}"}, HTTPStatus.BAD_GATEWAY)
+            if parsed.path.startswith("/api/editor/") or parsed.path == "/api/memory/review":
+                self._send_json({"error": f"保存未完成：{exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            else:
+                self._send_json({"error": f"LLM request failed: {exc}"}, HTTPStatus.BAD_GATEWAY)
+
+    def _handle_memory(self, path: str) -> None:
+        from .memory import MemoryService
+        from .editing import EditingConflict
+        from .assistant import _ingest_lock
+        body = self._read_json()
+        service = MemoryService(self.store)
+        if path.endswith('/compare'):
+            self._send_json(service.compare(body.get('source_id'), provider=self.llm_provider,
+                                           model=self.llm_model, fallback_model=self.llm_fallback_model))
+            return
+        if not _ingest_lock.acquire(blocking=False):
+            self._send_json({'error': '知识库正在更新，请稍后保存。'}, HTTPStatus.CONFLICT)
+            return
+        try:
+            self._send_json(service.update(body))
+        except EditingConflict as exc:
+            self._send_json({'error': str(exc)}, HTTPStatus.CONFLICT)
+        finally:
+            _ingest_lock.release()
+
+    def _handle_editor_mutation(self, path: str) -> None:
+        from .assistant import _ingest_lock
+        from .editing import EditingConflict, EditingService
+        from .pipeline import ROOT, load_config
+        from .vault import ObsidianVault
+
+        match = re.fullmatch(r"/api/editor/(entities|triples|changes)/([1-9][0-9]*)(/delete|/undo)?", path)
+        if not match:
+            self._send_json({"error": "没有这个编辑操作"}, HTTPStatus.NOT_FOUND)
+            return
+        resource, identifier, action = match.groups()
+        operations = {("entities", None): "update_entity", ("triples", None): "update_triple",
+                      ("triples", "/delete"): "delete_triple", ("changes", "/undo"): "undo"}
+        operation = operations.get((resource, action))
+        if operation is None:
+            self._send_json({"error": "没有这个编辑操作"}, HTTPStatus.NOT_FOUND)
+            return
+        body = self._read_json()
+        if not _ingest_lock.acquire(blocking=False):
+            self._send_json({"error": "知识库正在更新，请稍后再保存。"}, HTTPStatus.CONFLICT)
+            return
+        try:
+            vault_path = self.editor_vault_path
+            if vault_path is None:
+                vault_path = ROOT / load_config().get("paths", {}).get("vault", "vault")
+            service = EditingService(self.store, ObsidianVault(vault_path))
+            method = getattr(service, operation)
+            result = method(int(identifier)) if operation == "undo" else method(int(identifier), body)
+            self._send_json(result)
+        except EditingConflict as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+        finally:
+            _ingest_lock.release()
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT.value)
@@ -151,7 +225,15 @@ class GraphApiHandler(BaseHTTPRequestHandler):
             self._send_json(result)
 
     def _handle_chat(self) -> None:
-        body = self._read_json()
+        body = self._read_json(max_bytes=256_000)
+        from .chat_history import validate_history
+        history = validate_history(body.get('history', []))
+        agent = body.get('agent', False)
+        if not isinstance(agent, bool):
+            raise ValueError('agent must be a boolean')
+        content_id = body.get('content_id', '')
+        if not isinstance(content_id, str) or len(content_id) > 200:
+            raise ValueError('invalid content_id')
         question = str(body.get("question", "")).strip()
         if not question:
             raise ValueError("missing required field: question")
@@ -175,7 +257,8 @@ class GraphApiHandler(BaseHTTPRequestHandler):
 
         from .assistant import respond
         options = dict(mode=mode, expand=expand, top=top, provider=self.llm_provider,
-                       model=self.llm_model, fallback_model=self.llm_fallback_model)
+                       model=self.llm_model, fallback_model=self.llm_fallback_model, history=history,
+                       agent=agent, content_id=content_id)
         if body.get("stream") is True:
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -284,6 +367,7 @@ def _chat_response(
     provider: str | None = None,
     model: str | None = None,
     fallback_model: str | None = None,
+    history: list | None = None,
 ) -> dict:
     """Retrieve graph context first, then pass that exact payload to the LLM."""
     context = store.related_graph(question, mode=mode, limit=top, expand=expand)
@@ -295,6 +379,18 @@ def _chat_response(
             context["mode"] = mode
             context["expand"] = expand
     context["top"] = top
+    if history:
+        # Prior user turns help resolve follow-ups such as "why does it do that?".
+        if not context['matched_entities']:
+            for message in reversed(history):
+                if message['role'] != 'user':
+                    continue
+                names = _entities_mentioned_in_question(store, message['content'])
+                if names:
+                    context = store.related_graph(' '.join(names), mode='terms', limit=top, expand=expand)
+                    context.update(query=question, mode=mode, expand=expand, top=top)
+                    break
+        context['conversation_history'] = history
     if answerer is None:
         from .llm import answer_graph_question
 

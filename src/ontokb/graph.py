@@ -9,6 +9,7 @@ import json
 import re
 import sqlite3
 import unicodedata
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -52,6 +53,33 @@ CREATE TABLE IF NOT EXISTS contents (
 );
 CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(subject_id);
 CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object_id);
+CREATE TABLE IF NOT EXISTS manual_entities (
+    entity_id INTEGER PRIMARY KEY,
+    original_names TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS manual_triples (
+    triple_id INTEGER PRIMARY KEY,
+    original TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS manual_triple_keys (
+    triple_id INTEGER NOT NULL,
+    subject_id INTEGER NOT NULL,
+    predicate TEXT NOT NULL,
+    object_id INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY(triple_id, subject_id, predicate, object_id, source)
+);
+CREATE INDEX IF NOT EXISTS idx_manual_triple_keys ON manual_triple_keys(subject_id,predicate,object_id,source);
+CREATE TABLE IF NOT EXISTS edit_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    before_state TEXT NOT NULL,
+    after_state TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    undone INTEGER NOT NULL DEFAULT 0
+);
 """
 
 _CHINESE_VARIANTS = {
@@ -115,7 +143,10 @@ class GraphStore:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
+        self._transaction_depth = 0
         self.conn.executescript(_SCHEMA)
+        from .memory import SCHEMA as MEMORY_SCHEMA
+        self.conn.executescript(MEMORY_SCHEMA)
         self._migrate()
 
     def _migrate(self) -> None:
@@ -132,6 +163,25 @@ class GraphStore:
 
     def close(self) -> None:
         self.conn.close()
+
+    def _commit(self):
+        if not self._transaction_depth:
+            self.conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        if self._transaction_depth:
+            raise RuntimeError('Nested graph transactions are not supported')
+        self.conn.execute('BEGIN IMMEDIATE')
+        self._transaction_depth = 1
+        try:
+            yield
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+        finally:
+            self._transaction_depth = 0
 
     # -- entities ---------------------------------------------------------
 
@@ -153,6 +203,17 @@ class GraphStore:
         if not norm:
             raise OntologyError("entity name must not be empty")
         row = self._resolve(norm)
+        if row is not None and self.conn.execute(
+            'SELECT 1 FROM manual_entities WHERE entity_id=?', (row['id'],)
+        ).fetchone():
+            # Extraction may add provenance, but cannot overwrite human decisions.
+            sources = json.loads(row['sources'])
+            if source and source not in sources:
+                sources.append(source)
+                self.conn.execute('UPDATE entities SET sources=? WHERE id=?',
+                                  (json.dumps(sources, ensure_ascii=False), row['id']))
+            self._commit()
+            return row['id']
         properties = dict(entity.properties)
         if incoming_type == "Claim":
             properties.setdefault("text", entity.name)
@@ -220,7 +281,7 @@ class GraphStore:
                 "INSERT OR IGNORE INTO aliases (norm_alias, entity_id) VALUES (?,?)",
                 (normalize(alias), eid),
             )
-        self.conn.commit()
+        self._commit()
         return eid
 
     def _resolve(self, norm: str) -> Optional[sqlite3.Row]:
@@ -394,17 +455,21 @@ class GraphStore:
         obj_type = obj["type"] if obj else None
         if subj is None or obj is None or subj_type is None or obj_type is None:
             raise ValueError(f"triple references unknown entity: {triple.subject!r} / {triple.object!r}")
+        predicate = ontology.canonical_relation(triple.predicate)
+        if self.conn.execute('SELECT 1 FROM manual_triple_keys WHERE subject_id=? AND predicate=? AND object_id=? AND source=?',
+                             (subj['id'], predicate, obj['id'], source)).fetchone():
+            return False
         ontology.validate_triple(subj_type, triple.predicate, obj_type)
         try:
             self.conn.execute(
-                "INSERT INTO triples (subject_id, predicate, object_id, confidence, source, evidence, created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO triples (subject_id, predicate, object_id, confidence, source, evidence, created_at, id) "
+                "VALUES (?,?,?,?,?,?,?, (SELECT max(n)+1 FROM (SELECT coalesce(max(id),0) n FROM triples UNION ALL SELECT coalesce(max(triple_id),0) n FROM manual_triples)))",
                 (subj["id"], ontology.canonical_relation(triple.predicate), obj["id"], triple.confidence, source,
                  triple.evidence, created_at),
             )
         except sqlite3.IntegrityError:
             return False
-        self.conn.commit()
+        self._commit()
         return True
 
     def neighbors(self, entity_id: int) -> list[sqlite3.Row]:
@@ -469,7 +534,7 @@ class GraphStore:
             (content_id, kind, source, url, title, status,
              json.dumps(meta or {}, ensure_ascii=False)),
         )
-        self.conn.commit()
+        self._commit()
 
     # -- facts for the rule engine ----------------------------------------
 

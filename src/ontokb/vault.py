@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import contextmanager
 from pathlib import Path
 
 from .graph import GraphStore
@@ -21,14 +22,45 @@ def slugify(name: str) -> str:
 class ObsidianVault:
     def __init__(self, root: str | Path):
         self.root = Path(root)
+        self._journal = None
         for d in DIRS:
             (self.root / d).mkdir(parents=True, exist_ok=True)
 
     def _write(self, rel: str, text: str) -> Path:
         path = self.root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        self._remember(path)
+        temporary = path.with_suffix(path.suffix + '.tmp')
+        try:
+            temporary.write_text(text, encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
         return path
+
+    def _remember(self, path):
+        if self._journal is not None and path not in self._journal:
+            self._journal[path] = path.read_bytes() if path.exists() else None
+
+    def remove_entity_note(self, name):
+        path = self.root / 'Entities' / (slugify(name) + '.md')
+        self._remember(path)
+        path.unlink(missing_ok=True)
+
+    @contextmanager
+    def transaction(self):
+        self._journal = {}
+        try:
+            yield
+        except BaseException:
+            for path, previous in self._journal.items():
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(previous)
+            raise
+        finally:
+            self._journal = None
 
     def write_content_note(self, item: ContentItem, processed: ProcessedContent) -> Path:
         topics_links = ", ".join(f'"[[{slugify(t)}]]"' for t in processed.topics)
@@ -73,7 +105,9 @@ class ObsidianVault:
             "## Relations",
         ]
         if row["type"] == "Claim":
-            lines[8:8] = ["> 此节点记录来源论断，尚未独立事实核验。", ""]
+            status = props.get('verificationStatus', 'unverified')
+            label = {'unverified': '待核实', 'verified': '已核实', 'disputed': '有争议', 'refuted': '已否定'}.get(status, '待核实')
+            lines[8:8] = ["> 来源论断 · 人工核实状态：" + label, ""]
         if props.get("reviewStatus") == "needs_review":
             lines[8:8] = ["> 分类待复核：" + props.get("reviewReason", "需更多身份资料"), ""]
         for rel in graph.neighbors(row["id"]):

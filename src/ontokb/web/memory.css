@@ -1,0 +1,7 @@
+#memory-dialog{width:1160px;max-width:96vw;height:min(850px,94vh);max-height:94vh;padding:0;overflow:hidden}
+.memory-toolbar{display:flex;gap:10px;padding:12px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.memory-toolbar input,.memory-toolbar select{min-width:150px;flex:1;font-size:12px}
+#memory-source{max-width:800px}#memory-dialog .ke-count{padding-top:14px}
+.memory-report{white-space:pre-wrap;line-height:1.9;font-size:14px;overflow-wrap:anywhere}
+#memory-dialog .ke-content form{display:flex;flex-direction:column}#memory-dialog .ke-content label{display:flex;flex-direction:column;gap:6px}
+@media(max-width:680px){#memory-dialog{width:100vw;max-width:100vw;height:100dvh;max-height:100dvh;border-radius:0}.memory-toolbar{padding:9px 14px;gap:6px}.memory-toolbar input,.memory-toolbar select{min-width:100px}.memory-toolbar button{font-size:11px}}

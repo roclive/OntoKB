@@ -17,8 +17,54 @@ def _mentioned(text: str, name: str) -> bool:
     return name.casefold() in text.casefold()
 
 
+def article_categories(title: str, meta: dict) -> list[str]:
+    """Prefer curated categories; otherwise derive browsing tags from metadata."""
+    explicit = meta.get('categories')
+    if isinstance(explicit, list):
+        labels = list(dict.fromkeys(s.strip() for s in explicit if isinstance(s, str) and s.strip()))
+        if labels:
+            return labels
+    text = ' '.join([title, str(meta.get('summary') or ''),
+                     *[str(t) for t in meta.get('topics', [])]])
+    rules = {
+        '实证类': r'实证|随机对照|实验研究|数据分析|案例研究|调查研究',
+        'AI类': r'(?<![a-zA-Z])AI(?![a-zA-Z])|人工智能|具身智能|机器人|大模型|机器学习|OpenAI',
+        '历史类': r'历史|政改|改革开放|文革|辛亥|近代|朝代',
+        '经济类': r'经济|金融|融资|投资|估值|泡沫|资本|通胀',
+    }
+    return [label for label, pattern in rules.items() if re.search(pattern, text, re.I)] or ['未分类']
+
+
+def set_article_category(graph, body: dict) -> dict:
+    """Persist the user's category without replacing other article metadata."""
+    from .assistant import _ingest_lock
+
+    content_id, category = body.get('content_id'), body.get('category')
+    if not isinstance(content_id, str) or not content_id.strip():
+        raise ValueError('请选择一篇文章。')
+    if not isinstance(category, str) or category not in {'历史', '科技', '时政'}:
+        raise ValueError('请选择历史、科技或时政。')
+    if not _ingest_lock.acquire(blocking=False):
+        raise ValueError('知识库正在更新，请稍后重试。')
+    try:
+        with graph.conn:
+            row = graph.conn.execute("SELECT meta FROM contents WHERE id=? AND status='processed'", (content_id,)).fetchone()
+            if row is None:
+                raise ValueError('文章不存在或尚未处理完成。')
+            meta = json.loads(row['meta'])
+            meta['categories'] = [category]
+            graph.conn.execute('UPDATE contents SET meta=? WHERE id=?',
+                               (json.dumps(meta, ensure_ascii=False), content_id))
+        return {'content_id': content_id, 'categories': [category]}
+    finally:
+        _ingest_lock.release()
+
+
 def reading_library(graph) -> list[dict]:
     entities = [dict(r) for r in graph.conn.execute("SELECT * FROM entities ORDER BY id")]
+    lookup_names: dict[int, list[str]] = {}
+    for alias in graph.conn.execute("SELECT entity_id,norm_alias FROM aliases"):
+        lookup_names.setdefault(alias['entity_id'], []).append(alias['norm_alias'])
     triples = [dict(r) for r in graph.conn.execute(
         "SELECT t.*,s.name s,o.name t FROM triples t "
         "JOIN entities s ON s.id=t.subject_id JOIN entities o ON o.id=t.object_id ORDER BY t.id")]
@@ -39,7 +85,8 @@ def reading_library(graph) -> list[dict]:
         steps = []
         for sentence in text_steps:
             direct = [e['name'] for e in candidates
-                      if any(_mentioned(sentence, n) for n in [e['name'], *json.loads(e['aliases'])])]
+                      if any(_mentioned(sentence, n) for n in [e['name'], *json.loads(e['aliases']),
+                                                               *lookup_names.get(e['id'], [])])]
             direct = list(dict.fromkeys(direct))
             # Walk only existing edges from THIS source. Never infer a new edge
             # from two names co-occurring in a summary.
@@ -53,6 +100,7 @@ def reading_library(graph) -> list[dict]:
             steps.append({'text': sentence, 'entities': direct, 'neighbors': neighbors, 'edges': edges})
         library.append({'id': row['id'], 'title': row['title'] or row['id'], 'url': row['url'],
                         'kind': row['kind'], 'source': row['source'], 'summary': summary,
+                        'categories': article_categories(row['title'] or '', meta),
                         'key_points': meta.get('key_points', []), 'steps': steps,
                         'entity_count': len(candidates), 'relation_count': len(facts),
                         'rejections': len(meta.get('extraction_rejections', []))})

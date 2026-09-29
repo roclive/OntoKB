@@ -27,20 +27,24 @@ async function ensureBackend() {
     return;
   }
   log = fs.createWriteStream(path.join(app.getPath('userData'), 'backend.log'), { flags: 'a' });
+  const record = message => fs.appendFileSync(path.join(app.getPath('userData'), 'backend.log'), `[${new Date().toISOString()}] ${message}\n`);
+  record(`Starting backend: ${config.python}; project: ${config.projectRoot}`);
   backend = spawn(config.python, ['-m', 'ontokb.cli', 'api', '--host', '127.0.0.1', '--port', '8765'], {
     cwd: config.projectRoot, windowsHide: true,
     env: { ...process.env, PYTHONUTF8: '1', PYTHONPATH: path.join(config.projectRoot, 'src'), ONTOKB_LLM_PROVIDER: 'codex' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let failure;
-  backend.on('error', err => failure = err);
-  backend.stdout.pipe(log); backend.stderr.pipe(log);
-  backend.on('exit', code => {
+  backend.on('error', err => { failure = err; record(`Backend spawn error: ${err.stack || err.message}`); });
+  backend.stdout.pipe(log, { end: false }); backend.stderr.pipe(log, { end: false });
+  backend.on('close', () => log.end());
+  backend.on('exit', (code, signal) => {
+    record(`Backend exited: code=${code}, signal=${signal}, quitting=${quitting}`);
     if (win && !quitting) dialog.showErrorBox('OntoKB 后端已停止', `退出码：${code}。请退出后重新打开程序。日志：${app.getPath('userData')}\\backend.log`);
   });
   for (let i = 0; i < 60; i++) {
     if (failure) throw failure;
-    if (backend.exitCode !== null) throw new Error('后端启动失败，请检查 backend.log');
+    if (backend.exitCode !== null || backend.signalCode !== null) throw new Error(`后端启动失败（退出码：${backend.exitCode}，信号：${backend.signalCode || '无'}），请检查 backend.log`);
     if (await health()) return;
     await new Promise(resolve => setTimeout(resolve, 500));
   }
@@ -61,7 +65,8 @@ function menus() {
     { label: '阅读', submenu: [
       { label: '新建文章摘要', accelerator: 'CmdOrCtrl+N', click: () => { show(); win?.webContents.executeJavaScript("document.getElementById('article-open')?.click()"); } },
       { label: '阅读工作台', click: () => { show(); win?.webContents.executeJavaScript("document.getElementById('reading-nav')?.click()"); } },
-      { label: '探索图谱', click: () => { show(); win?.webContents.executeJavaScript("document.getElementById('explore-nav')?.click()"); } }
+      { label: '探索图谱', click: () => { show(); win?.webContents.executeJavaScript("document.getElementById('explore-nav')?.click()"); } },
+      { label: '整理知识', accelerator: 'CmdOrCtrl+Shift+E', click: () => { show(); win?.webContents.executeJavaScript("window.KnowledgeEditor?.open()"); } }
     ] },
     { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
     { label: '视图', submenu: [{ role: 'reload' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] }]));

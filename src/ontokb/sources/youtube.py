@@ -9,6 +9,9 @@ import hashlib
 import json
 import re
 import tempfile
+import html
+import urllib.request
+from urllib.parse import urljoin
 from pathlib import Path
 
 from ..models import ContentItem
@@ -118,18 +121,21 @@ def fetch_transcript(
         info = ydl.extract_info(item.url, download=False)
         item.title = item.title or info.get("title", "")
         item.duration_seconds = int(info.get("duration") or 0) or None
-        subs = {**(info.get("subtitles") or {}), **(info.get("automatic_captions") or {})}
-        for lang in langs:
-            tracks = subs.get(lang)
-            if not tracks:
-                continue
-            vtt = next((t for t in tracks if t.get("ext") == "vtt"), tracks[0])
-            import urllib.request
-
-            with urllib.request.urlopen(vtt["url"], timeout=30) as resp:
-                text = vtt_to_text(resp.read().decode("utf-8", errors="replace"))
-                _write_cached_transcript(item, text, cache_dir, source=f"caption:{lang}")
-                return text
+        for subs in (info.get("subtitles") or {}, info.get("automatic_captions") or {}):
+            for lang in langs:
+                for track in subs.get(lang) or []:
+                    if track.get("ext") not in {"vtt", "json3"}:
+                        continue
+                    try:
+                        text = _fetch_caption_text(track["url"])
+                        if not valid_transcript(text):
+                            raise ValueError("字幕响应不含有效正文")
+                    except (OSError, ValueError, KeyError):
+                        if progress:
+                            progress('字幕下载或解析失败，正在尝试其他字幕或音频转写…')
+                        continue
+                    _write_cached_transcript(item, text, cache_dir, source=f"caption:{lang}")
+                    return text
     text = _transcribe_with_whisper(
         item,
         cookies_file=cookies_file,
@@ -139,7 +145,46 @@ def fetch_transcript(
         compute_type=whisper_compute_type,
         progress=progress,
     )
+    if not valid_transcript(text):
+        raise ValueError('音频转写未返回有效正文，未入库。')
     _write_cached_transcript(item, text, cache_dir, source=f"faster-whisper:{whisper_model}")
+    return text
+
+
+def valid_transcript(text: str) -> bool:
+    """Reject transport payloads accidentally cached as spoken content."""
+    stripped = text.lstrip('\ufeff \r\n\t')
+    return bool(stripped) and not (
+        stripped.startswith(('#EXTM3U', '#EXT-X-', '{', '[', '<?xml'))
+        or re.match(r'(?i)<(?:!doctype|html|head|body|error)\b', stripped)
+        or all(re.match(r'https?://', line.strip()) for line in stripped.splitlines() if line.strip())
+    )
+
+
+def _fetch_caption_text(url: str, depth: int = 0) -> str:
+    """YouTube may serve an HLS playlist at a URL labelled as VTT."""
+    if depth > 2:
+        raise ValueError('字幕索引嵌套过深')
+    with urllib.request.urlopen(url, timeout=30) as response:
+        payload = response.read().decode('utf-8-sig', errors='replace').strip()
+    if payload.startswith('#EXTM3U'):
+        segments = [line.strip() for line in payload.splitlines()
+                    if line.strip() and not line.lstrip().startswith('#')]
+        if not segments or len(segments) > 256 or '#EXT-X-STREAM-INF' in payload:
+            raise ValueError('不支持的字幕索引')
+        # Fetch every segment; never accept a partially downloaded transcript.
+        text = '\n'.join(_fetch_caption_text(urljoin(url, segment), depth + 1)
+                         for segment in segments)
+    elif payload.startswith('{'):
+        data = json.loads(payload)
+        text = '\n'.join(''.join(s.get('utf8', '') for s in event.get('segs', []))
+                         for event in data.get('events', []))
+    elif payload.startswith('WEBVTT') or '-->' in payload:
+        text = vtt_to_text(payload)
+    else:
+        raise ValueError('字幕格式无法识别')
+    if not valid_transcript(text):
+        raise ValueError('字幕为空或仍是索引')
     return text
 
 
@@ -153,9 +198,12 @@ def _read_cached_transcript(item: ContentItem, cache_dir: str | Path | None) -> 
     path = _cache_path(item, cache_dir)
     if path is None or not path.exists():
         return ""
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
     text = str(data.get("raw_text") or "")
-    if not text.strip():
+    if not valid_transcript(text):
         return ""
     item.title = item.title or data.get("title", "")
     if data.get("duration_seconds") and not item.duration_seconds:
@@ -272,9 +320,10 @@ def vtt_to_text(vtt: str) -> str:
     for line in vtt.splitlines():
         line = line.strip()
         if (not line or line.startswith(("WEBVTT", "Kind:", "Language:", "NOTE"))
+                or line.startswith(('X-TIMESTAMP-MAP', 'STYLE', 'REGION'))
                 or "-->" in line or line.isdigit()):
             continue
-        line = re.sub(r"<[^>]+>", "", line)
+        line = html.unescape(re.sub(r"<[^>]+>", "", line))
         if line and line not in seen:
             seen.add(line)
             lines.append(line)

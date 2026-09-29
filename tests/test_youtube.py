@@ -2,11 +2,46 @@ from __future__ import annotations
 
 import sys
 import json
+import io
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
 from ontokb.models import ContentItem
 from ontokb.sources import youtube
+
+
+def test_hls_caption_index_downloads_segment_bodies(monkeypatch):
+    responses = {
+        'https://example.test/captions/index.m3u8': '#EXTM3U\n#EXTINF:600,\npart1.vtt\n#EXTINF:600,\npart2.vtt',
+        'https://example.test/captions/part1.vtt': 'WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0\n\n00:00:00.000 --> 00:00:02.000\n第一段正文',
+        'https://example.test/captions/part2.vtt': 'WEBVTT\n\n00:10:00.000 --> 00:10:02.000\n第二段正文 &amp; 细节',
+    }
+    monkeypatch.setattr(youtube.urllib.request, 'urlopen',
+                        lambda url, **kw: io.BytesIO(responses[url].encode()))
+    assert youtube._fetch_caption_text('https://example.test/captions/index.m3u8') == '第一段正文\n第二段正文 & 细节'
+
+
+def test_caption_segment_failure_does_not_accept_partial_text(monkeypatch):
+    def read(url, **kwargs):
+        if url.endswith('index'):
+            return io.BytesIO(b'#EXTM3U\na.vtt\nb.vtt')
+        if url.endswith('a.vtt'):
+            return io.BytesIO(b'WEBVTT\n00:00:00 --> 00:00:01\nfirst')
+        raise OSError('segment unavailable')
+    monkeypatch.setattr(youtube.urllib.request, 'urlopen', read)
+    with pytest.raises(OSError):
+        youtube._fetch_caption_text('https://example.test/index')
+
+
+@pytest.mark.parametrize('body', ['#EXTM3U\n#EXTINF:600,\nhttps://example.test/subs',
+                                 '<html>Request denied</html>', 'https://example.test/subs', ''])
+def test_transport_payload_is_not_transcript(tmp_path, body):
+    item = ContentItem(id='yt:CETs0u10aSc', kind='video', source='youtube',
+                       url='https://youtu.be/CETs0u10aSc')
+    (tmp_path / 'CETs0u10aSc.json').write_text(json.dumps({'raw_text': body}), encoding='utf-8')
+    assert not youtube.valid_transcript(body)
+    assert youtube._read_cached_transcript(item, tmp_path) == ''
 
 
 def test_fetch_transcript_falls_back_to_whisper(monkeypatch, tmp_path):

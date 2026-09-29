@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import copy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +22,70 @@ def _fake_openai_client(payload: dict):
             )
 
     return SimpleNamespace(responses=FakeResponses())
+
+
+def test_source_replacement_preserves_other_sources_and_prunes_old_nodes(pipe):
+    from ontokb.models import ExtractedEntity
+    item=ContentItem(id='yt:replace0001',kind='video',source='youtube',url='https://youtu.be/replace0001',title='Replace test',raw_text='old body')
+    pipe.ingest(item,client=_fake_openai_client(EXTRACTION))
+    other=item.model_copy(update={'id':'yt:other000001','title':'Other video'})
+    pipe.ingest(other,client=_fake_openai_client(EXTRACTION))
+    pipe.graph.upsert_entity(ExtractedEntity(name='Old isolated claim',type='Claim'),source=item.id)
+    pipe.vault.write_entity_note(pipe.graph,'Old isolated claim')
+    payload=copy.deepcopy(EXTRACTION)
+    payload.update(summary='New complete body analysis',key_points=['New evidence'],topics=[],triples=[])
+    payload['entities']=[{'name':'New software','type':'SoftwareApplication','aliases':[],'properties':[]}]
+    before_other=[dict(r) for r in pipe.graph.conn.execute('SELECT * FROM triples WHERE source=?',(other.id,))]
+    item.raw_text='New complete source body'
+    result=pipe.ingest(item,client=_fake_openai_client(payload),replace_source=True)
+    assert result['verified'] and result['removed_relations']>0
+    assert [dict(r) for r in pipe.graph.conn.execute('SELECT * FROM triples WHERE source=?',(other.id,))]==before_other
+    assert pipe.graph.get_entity('Old isolated claim') is None
+    assert not (pipe.vault.root/'Entities'/'Old isolated claim.md').exists()
+    assert item.id not in json.loads(pipe.graph.get_entity('OpenAI')['sources'])
+    assert (Path(result['backup'])/'knowledge.db').exists()
+    assert 'New complete body analysis' in Path(result['note_path']).read_text(encoding='utf-8')
+
+
+def test_failed_note_write_rolls_back_database_and_notes(pipe,monkeypatch):
+    item=ContentItem(id='yt:rollback001',kind='video',source='youtube',url='https://youtu.be/rollback001',title='Rollback test',raw_text='old body')
+    pipe.ingest(item,client=_fake_openai_client(EXTRACTION))
+    before='\n'.join(pipe.graph.conn.iterdump())
+    files={str(p.relative_to(pipe.vault.root)):p.read_bytes() for p in pipe.vault.root.rglob('*.md')}
+    def fail(*a,**kw): raise OSError('Simulated disk error')
+    monkeypatch.setattr(pipe.vault,'write_entity_note',fail)
+    payload=copy.deepcopy(EXTRACTION);payload['summary']='Replacement that must roll back'
+    with pytest.raises(OSError,match='disk error'):
+        pipe.ingest(item.model_copy(update={'raw_text':'new body'}),client=_fake_openai_client(payload),replace_source=True)
+    assert '\n'.join(pipe.graph.conn.iterdump())==before
+    assert {str(p.relative_to(pipe.vault.root)):p.read_bytes() for p in pipe.vault.root.rglob('*.md')}==files
+
+
+def test_agent_sync_restores_note_from_saved_snapshot(pipe,monkeypatch):
+    from ontokb.knowledge_agent import KnowledgeTools
+    item=ContentItem(id='article:sync',kind='article',source='other',url='',title='Sync test',raw_text='Article source body')
+    stats=pipe.ingest(item,client=_fake_openai_client(EXTRACTION))
+    note=Path(stats['note_path']);note.write_text('Outdated note',encoding='utf-8')
+    monkeypatch.setattr('ontokb.knowledge_agent.load_config',lambda:pipe.config)
+    host=KnowledgeTools(pipe.graph,item.id,{},lambda m:None)
+    assert host.read('')['analysis_current']
+    assert not host.read('')['note_matches_summary']
+    result=host.call('kb_sync_note',{'target':''})
+    assert result['verified'] and result['changed']
+    assert EXTRACTION['summary'] in note.read_text(encoding='utf-8')
+    assert host.call('kb_sync_note',{'target':''})==result
+    assert len(host.operations)==1
+    with pytest.raises(ValueError): host.call('shell',{'command':'ignored'})
+
+
+def test_agent_read_does_not_write_or_accept_paths(pipe,monkeypatch):
+    from ontokb.knowledge_agent import KnowledgeTools
+    monkeypatch.setattr('ontokb.knowledge_agent.load_config',lambda:pipe.config)
+    host=KnowledgeTools(pipe.graph,'',{},lambda m:None)
+    before='\n'.join(pipe.graph.conn.iterdump())
+    with pytest.raises(ValueError): host.call('kb_read_document',{'target':'../../private.txt'})
+    assert host.operations[-1]['status']=='failed'
+    assert '\n'.join(pipe.graph.conn.iterdump())==before
 
 
 @pytest.fixture()

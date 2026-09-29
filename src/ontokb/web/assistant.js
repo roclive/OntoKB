@@ -17,6 +17,59 @@ const chatTop = document.getElementById('chat-top');
 const chatIntro = chatMessages.querySelector('.chat-intro');
 if(location.protocol === 'http:' || location.protocol === 'https:') document.getElementById('api-base').value = location.origin;
 let chatHealthChecked = false;
+let chatBusy = false;
+let conversationHistory = [];
+let agentAvailable = true;
+const chatSettings=document.getElementById('chat-options');
+const advancedSettings=document.createElement('details');
+const advancedSummary=document.createElement('summary');advancedSummary.textContent='检索设置';
+const advancedFields=document.createElement('div');advancedFields.className='chat-query-settings';
+while(chatSettings.firstChild)advancedFields.appendChild(chatSettings.firstChild);
+advancedSettings.append(advancedSummary,advancedFields);chatSettings.appendChild(advancedSettings);
+chatInput.rows=2;
+const agentLabel = document.createElement('label');
+const agentToggle = document.createElement('input');
+agentToggle.type = 'checkbox'; agentToggle.checked = true;
+agentLabel.append(agentToggle, document.createTextNode('执行助手'));
+document.getElementById('chat-options').appendChild(agentLabel);
+const actionBar = document.createElement('div'); actionBar.className='chat-actions';
+const selectedLabel=document.createElement('div'); selectedLabel.className='chat-hint';
+selectedLabel.classList.add('chat-target');
+function updateChatTarget(){selectedLabel.textContent='当前资料：'+(currentDoc?.title||'未选择，可发送 YouTube 链接');selectedLabel.title=selectedLabel.textContent;}
+const actionButtons=[];
+for(const [label,request] of [['检查资料','请检查当前资料的正文、摘要和笔记是否一致，先不要修改。'],['重新分析并回写','请用完整正文重新分析当前资料，替换旧摘要和该来源的旧关系，并同步笔记。'],['同步笔记','请将当前资料最新的分析结果同步到 Obsidian 笔记，并验证结果。']]){
+  const button=document.createElement('button');button.type='button';button.textContent=label;
+  button.onclick=()=>{if(chatBusy)return;agentToggle.checked=true;chatInput.value=request;chatForm.requestSubmit();};
+  actionButtons.push(button);actionBar.appendChild(button);
+}
+chatForm.prepend(selectedLabel,actionBar);updateChatTarget();
+document.getElementById('document-select').addEventListener('change',updateChatTarget);
+const maximize=document.createElement('button');maximize.type='button';maximize.textContent='展开';maximize.setAttribute('aria-label','展开聊天窗口');
+maximize.onclick=()=>{const panel=document.getElementById('query-panel');panel.classList.toggle('expanded');maximize.textContent=panel.classList.contains('expanded')?'收起':'展开';};
+document.querySelector('.drawer-head').insertBefore(maximize,document.getElementById('assistant-close'));
+const newChatButton = document.createElement('button');
+newChatButton.type = 'button';
+newChatButton.textContent = '新对话';
+document.getElementById('chat-options').appendChild(newChatButton);
+const historyHint = document.createElement('div');
+historyHint.className = 'chat-hint';
+historyHint.textContent = '会携带最近 10 轮对话（最多 32,000 字符）；刷新页面或新对话会清空。';
+chatForm.appendChild(historyHint);
+newChatButton.onclick = () => {
+  if(chatBusy) return;
+  conversationHistory = [];
+  chatMessages.replaceChildren(chatIntro);
+  historyHint.textContent = '新对话 · 会携带最近 10 轮（最多 32,000 字符）；刷新页面会清空。';
+  chatInput.value = '';
+  chatInput.focus();
+};
+function rememberTurn(question, answer){
+  conversationHistory.push({role:'user',content:question},{role:'assistant',content:answer});
+  while(conversationHistory.length > 20 || conversationHistory.reduce((n,m)=>n+Array.from(m.content).length,0)>32000){
+    conversationHistory.splice(0,2);
+  }
+  historyHint.textContent = '本次会话已保留 ' + conversationHistory.length/2 + ' 轮 · 最多 10 轮 / 32,000 字符 · 刷新或新对话会清空';
+}
 
 async function checkChatHealth(){
   if(chatHealthChecked) return;
@@ -25,11 +78,15 @@ async function checkChatHealth(){
     const res = await fetch(apiUrl('/health', {}));
     if(!res.ok) throw new Error('HTTP ' + res.status);
     const health = await res.json();
+    if(!health.features?.knowledge_tools || health.llm_provider !== 'codex'){
+      agentAvailable=false;
+      agentToggle.checked=false;agentToggle.disabled=true;actionButtons.forEach(b=>b.disabled=true);
+    }
     if(health.chat !== true){
       chatIntro.textContent = '当前运行的是旧版 API，不支持 Chat。请停止后重新运行 ontokb api。';
       chatIntro.dataset.state = 'error';
     } else if(health.llm_provider === 'codex' && health.llm_configured){
-      chatIntro.textContent = 'Codex 已接入。粘贴 YouTube 链接即可获取内容、分析并入库，也可以查询已有知识。';
+      chatIntro.textContent = 'Codex 知识助手：可检查资料、基于正文回答、重新分析并回写图谱、同步 Obsidian 笔记。执行助手会显示操作结果；关闭后为普通问答。视频分析使用字幕或音频转写，暂不读取画面。';
     } else if(!health.llm_configured){
       const keyName = health.llm_provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
       chatIntro.textContent = health.llm_provider === 'codex' ? '未找到 Codex CLI，请安装并运行 codex login。' : '后端已连接，但未检测到 ' + keyName + '。请设置 Key 后重启 ontokb api。';
@@ -303,7 +360,14 @@ function appendMessage(role, body, context){
       ? 'KG 上下文 · ' + strategy + ' · ' + relations.length + ' 条关系：' + relations.slice(0, 3).map(row => row.relation).join('；')
       : 'KG 上下文 · ' + strategy + ' · 未命中关系';
     if(context.video_analysis){
-      sources.textContent = '视频已入库 · ' + relations.length + ' 条相关关系 · ';
+      sources.textContent = '视频资料 · ' + (context.document_status?.source_relations ?? relations.length) + ' 条关系 · ';
+      if(context.document_status){
+        sources.textContent += (context.document_status.analysis_current?'正文版本一致':'摘要需要重新分析') + ' · ' + (context.document_status.note_matches_summary?'笔记与摘要一致':'笔记待同步') + ' · ';
+      }
+      if(context.transcript_status){
+        const t = context.transcript_status;
+        sources.textContent += '正文 ' + t.characters + ' 字符 · 本次发送 ' + t.sent_characters + ' 字符' + (t.truncated ? '（已截断）' : '') + ' · ';
+      }
       const link = document.createElement('a');
       link.textContent = context.video_analysis.title || '查看原视频';
       link.href = context.video_analysis.url;
@@ -326,10 +390,14 @@ chatInput.addEventListener('keydown', ev => {
 
 chatForm.addEventListener('submit', async ev => {
   ev.preventDefault();
+  if(chatBusy) return;
   const question = chatInput.value.trim();
   if(!question) return chatInput.focus();
   const top = validTop(chatTop);
   if(top === null) return;
+  chatBusy = true;
+  agentToggle.disabled=true;actionButtons.forEach(b=>b.disabled=true);
+  newChatButton.disabled = true;
   appendMessage('user', question);
   chatInput.value = '';
   chatButton.disabled = true;
@@ -344,6 +412,9 @@ chatForm.addEventListener('submit', async ev => {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         question,
+        history: conversationHistory,
+        agent: agentToggle.checked,
+        content_id: currentDoc?.id || '',
         stream: true,
         mode: chatMode.value,
         expand: chatExpand.checked,
@@ -369,13 +440,21 @@ chatForm.addEventListener('submit', async ev => {
       if(done) break;
     }
     if(!result) throw new Error('连接中断，未收到完整结果。请重试；已入库视频会复用。');
-    if(result.ingested){
+    rememberTurn(question, result.answer);
+    if(result.ingested?.changed){
       progress.textContent = '已入库 · 正在更新摘要与图谱…';
-      try { await refreshReading(result.ingested.content_id); progress.textContent = '摘要与图谱已更新，可在阅读工作台漫游。'; }
+      try { await refreshReading(result.ingested.content_id); updateChatTarget(); progress.textContent = result.ingested.operation==='sync'?'笔记已同步并验证。':'摘要、图谱与笔记已更新并验证。'; }
       catch (err) { progress.textContent = '已入库，请刷新页面查看新摘要。'; }
     }
+    else if(result.ingested?.reused) progress.textContent='已读取已有分析，本次未修改摘要、图谱或笔记。';
     else progress.remove();
     appendMessage('assistant', result.answer, result.context);
+    if(result.operations?.length){
+      const details=document.createElement('details');details.className='chat-execution';details.open=true;
+      const summary=document.createElement('summary');summary.textContent='执行记录 · '+result.operations.length+' 项';details.appendChild(summary);
+      result.operations.forEach(op=>{const entry=document.createElement('div');entry.textContent=(op.status==='completed'?'✓ ':'✕ ')+op.label+(op.error?'：'+op.error:'');
+        if(op.result){const receipt=document.createElement('pre');const r=op.result;receipt.textContent=[r.verified?'回读验证通过':'未验证',r.note_path?'笔记：'+r.note_path:'',r.backup?'备份：'+r.backup:'',r.source_characters?'正文：'+r.source_characters+' 字符':'',r.removed_relations!==undefined?'替换旧关系：'+r.removed_relations+' 条':'',r.triples_accepted!==undefined?'新实体关系：'+r.triples_accepted+' 条 · 资料关联：'+r.document_links+' 条':'',r.rejected?'校验未通过：'+r.rejected+' 项（未写入）':''].filter(Boolean).join('\n');entry.appendChild(receipt);}details.appendChild(entry);});chatMessages.appendChild(details);chatMessages.scrollTop=chatMessages.scrollHeight;
+    }
     if(result.context && result.context.edges && result.context.edges.length){
       highlightRelation(result.context.edges[0]);
     }
@@ -387,6 +466,9 @@ chatForm.addEventListener('submit', async ev => {
       : '暂时无法回答：' + detail;
     appendMessage('assistant', hint);
   } finally {
+    chatBusy = false;
+    agentToggle.disabled=!agentAvailable;actionButtons.forEach(b=>b.disabled=!agentAvailable);
+    newChatButton.disabled = false;
     chatButton.disabled = false;
     chatButton.textContent = '发送';
     chatInput.focus();

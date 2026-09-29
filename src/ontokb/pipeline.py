@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
+import sqlite3
+import zipfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +27,12 @@ log = logging.getLogger("ontokb")
 DEFAULT_OUTPUT_LANGUAGE = "Simplified Chinese"
 
 ROOT = Path(__file__).resolve().parents[2]
+ANALYSIS_VERSION = 'source-grounded-v3'
+
+
+def analysis_stamp(text: str) -> dict:
+    return {'source_sha256': hashlib.sha256(text.encode('utf-8')).hexdigest(),
+            'source_characters': len(text), 'analysis_version': ANALYSIS_VERSION}
 
 
 def load_config(path: str | Path | None = None) -> dict:
@@ -71,7 +81,7 @@ class Pipeline:
 
     # -- M3/M4: LLM processing + graph build -------------------------------
 
-    def ingest(self, item: ContentItem, client=None) -> dict:
+    def ingest(self, item: ContentItem, client=None, *, replace_source=False) -> dict:
         """Process one content item end to end. Returns a small stats dict.
 
         Builds a two-tier graph: the LLM extracts the knowledge tier (entity-to-
@@ -81,7 +91,6 @@ class Pipeline:
         """
         if not item.raw_text:
             self.fetch(item)
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         llm = self.config.get("llm", {}) or {}
         defaults = self.config.get("defaults", {}) or {}
         processed = process_content(
@@ -97,6 +106,39 @@ class Pipeline:
             or DEFAULT_OUTPUT_LANGUAGE,
         )
 
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        backup = self.backup() if replace_source else None
+        with self.vault.transaction(), self.graph.transaction():
+            result = self._persist(item, processed, now, replace_source)
+        result.update(changed=True, reused=False, operation='reanalyze' if replace_source else 'ingest',
+                      backup=backup, verified=True)
+        return result
+
+    def backup(self):
+        db = Path(self.graph.conn.execute('PRAGMA database_list').fetchone()[2])
+        folder = db.parent / 'backups' / ('analysis-' + uuid.uuid4().hex)
+        folder.mkdir(parents=True)
+        with sqlite3.connect(folder / 'knowledge.db') as dest:
+            self.graph.conn.backup(dest)
+        with zipfile.ZipFile(folder / 'vault.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+            for path in self.vault.root.rglob('*.md'):
+                archive.write(path, path.relative_to(self.vault.root))
+        return str(folder)
+
+    def _persist(self, item, processed, now, replace_source):
+        old_names = []
+        removed_relations = 0
+        if replace_source:
+            replace_where = 'source=? AND id NOT IN (SELECT triple_id FROM manual_triples)'
+            removed_relations = self.graph.conn.execute('SELECT count(*) FROM triples WHERE ' + replace_where, (item.id,)).fetchone()[0]
+            self.graph.conn.execute('DELETE FROM triples WHERE ' + replace_where, (item.id,))
+            for row in self.graph.conn.execute('SELECT id,name,sources FROM entities').fetchall():
+                sources = json.loads(row['sources'])
+                if item.id in sources:
+                    old_names.append(row['name'])
+                    sources.remove(item.id)
+                    self.graph.conn.execute('UPDATE entities SET sources=? WHERE id=?',
+                                            (json.dumps(sources, ensure_ascii=False), row['id']))
         entity_types = {e.name: e.type for e in processed.entities}
         accepted, rejected = 0, 0
         accepted_entities: list[str] = []
@@ -138,17 +180,41 @@ class Pipeline:
             meta={"relevance": processed.relevance, "summary": processed.summary,
                   "added_time": now, "key_points": processed.key_points,
                   "extraction_rejections": rejection_details,
+                  **analysis_stamp(item.raw_text), 'analyzed_at': now,
+                  'processed_snapshot': processed.model_copy(update={
+                      'triples': validated_triples,
+                      'topics': [t for t in processed.topics if t not in rejected_names],
+                  }).model_dump(),
                   **({"raw_text": item.raw_text} if item.kind == "article" else {})},
         )
-        # Source notes project accepted knowledge, not rejected raw model output.
-        self.vault.write_content_note(item, processed.model_copy(update={
+        # Notes project current graph decisions, including protected manual edits.
+        from .editing import source_triples
+        validated_triples = source_triples(self.graph, item.id, knowledge_only=True)
+        note = self.vault.write_content_note(item, processed.model_copy(update={
             "triples": validated_triples,
-            "topics": [t for t in processed.topics if t not in rejected_names],
+            "topics": [entity['name'] if (entity := self.graph.get_entity(t)) else t
+                       for t in processed.topics if t not in rejected_names],
         }))
-        for name in accepted_entities:
-            self.vault.write_entity_note(self.graph, name)
+        pruned = 0
+        for name in set(old_names + accepted_entities):
+            row = self.graph.get_entity(name)
+            protected = row and (self.graph.conn.execute('SELECT 1 FROM manual_entities WHERE entity_id=?', (row['id'],)).fetchone()
+                                 or self.graph.conn.execute('SELECT 1 FROM manual_triple_keys WHERE subject_id=? OR object_id=?',
+                                                            (row['id'], row['id'])).fetchone())
+            if row and not protected and not json.loads(row['sources']) and not self.graph.degree(row['id']):
+                self.graph.conn.execute('DELETE FROM aliases WHERE entity_id=?', (row['id'],))
+                self.graph.conn.execute('DELETE FROM entities WHERE id=?', (row['id'],))
+                self.vault.remove_entity_note(name)
+                pruned += 1
+            else:
+                self.vault.write_entity_note(self.graph, name)
+        saved = json.loads(self.graph.conn.execute('SELECT meta FROM contents WHERE id=?', (item.id,)).fetchone()[0])
+        if saved['summary'] != processed.summary or processed.summary not in note.read_text(encoding='utf-8'):
+            raise RuntimeError('摘要与笔记一致性验证失败')
         return {"content_id": item.id, "triples_accepted": accepted,
-                "rejected": rejected, "document_links": doc_links}
+                "rejected": rejected, "document_links": doc_links, 'note_path': str(note),
+                'removed_relations': removed_relations, 'pruned_entities': pruned,
+                'source_characters': len(item.raw_text), 'analyzed_at': now}
 
     def _link_document(
         self,
@@ -167,8 +233,9 @@ class Pipeline:
         }
         if item.published_at:
             properties["published_at"] = item.published_at
+        existing_doc = self.graph.get_entity(item.id)
         doc = ExtractedEntity(
-            name=item.title or item.id,
+            name=existing_doc['name'] if existing_doc else item.title or item.id,
             type="VideoObject" if item.kind == "video" else "Article",
             aliases=[item.id],  # stable handle even if the title changes
             properties=properties,

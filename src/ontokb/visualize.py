@@ -41,16 +41,17 @@ _TYPE_LABELS_CN = {
     "CreativeWork": "作品", "MediaObject": "媒体", "VideoObject": "视频",
     "Article": "文章", "Book": "书籍",
 }
-_TYPE_LABELS_CN.update({"Thing": "待复核", "Claim": "论断（未验证）"})
+_TYPE_LABELS_CN.update({"Thing": "待复核", "Claim": "论断"})
 
 
 def graph_data(graph: GraphStore) -> dict:
     """Project entities + triples into the node/edge lists the page embeds."""
     nodes = [
-        {"id": row["name"], "type": row["type"],
+        {"id": row["name"], "entity_id": row["id"], "type": row["type"],
          "ontologyUri": graph.ontology.classes.get(graph.ontology.canonical_class(row["type"]), {}).get("uri", ""),
-         "reviewStatus": json.loads(row["properties"]).get("reviewStatus", "")}
-        for row in graph.conn.execute("SELECT name, type, properties FROM entities ORDER BY name")
+         "reviewStatus": json.loads(row["properties"]).get("reviewStatus", ""),
+         "verificationStatus": json.loads(row["properties"]).get("verificationStatus", "")}
+        for row in graph.conn.execute("SELECT id, name, type, properties FROM entities ORDER BY name")
     ]
     edges = [
         {"s": row["subject"], "p": row["predicate"], "t": row["object"]}
@@ -73,9 +74,13 @@ def render_html(data: dict, title: str = "Knowledge graph") -> str:
     from html import escape
     web = Path(__file__).parent / "web"
     html = (web / "reading.html").read_text(encoding="utf-8")
-    html = html.replace("__STYLE__", (web / "reading.css").read_text(encoding="utf-8"))
+    html = html.replace("__STYLE__", (web / "reading.css").read_text(encoding="utf-8")
+                        + "\n" + (web / "editor.css").read_text(encoding="utf-8")
+                        + "\n" + (web / "memory.css").read_text(encoding="utf-8"))
     html = html.replace("__SCRIPT__", (web / "reading.js").read_text(encoding="utf-8"))
-    html = html.replace("__ASSISTANT__", (web / "assistant.js").read_text(encoding="utf-8"))
+    html = html.replace("__ASSISTANT__", (web / "assistant.js").read_text(encoding="utf-8")
+                        + "\n" + (web / "editor.js").read_text(encoding="utf-8")
+                        + "\n" + (web / "memory.js").read_text(encoding="utf-8"))
     html = html.replace("__COLORS__", json.dumps(colors, ensure_ascii=False))
     html = html.replace("__FALLBACK__", json.dumps(_FALLBACK_COLOR))
     html = html.replace("__LABELS__", json.dumps(_TYPE_LABELS_CN, ensure_ascii=False))
