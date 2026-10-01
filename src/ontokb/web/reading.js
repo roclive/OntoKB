@@ -20,7 +20,24 @@ function menuAction(label,action){const button=document.createElement('button');
 function beginGraphMenu(event){event.preventDefault();event.stopPropagation();stopTour();closeGraphMenu();menuOrigin=event.currentTarget;if(menuOrigin.hasAttribute('aria-haspopup'))menuOrigin.setAttribute('aria-expanded','true');const rect=menuOrigin.getBoundingClientRect();menuPoint=event.type==='keydown'||(!event.clientX&&!event.clientY)?{x:rect.left+rect.width/2,y:rect.top+rect.height/2}:{x:event.clientX,y:event.clientY};graphMenu.replaceChildren();graphMenu.hidden=false;return menuVersion;}
 function moreMenuButton(label,action){const button=document.createElement('button');button.type='button';button.className='graph-more';button.textContent='⋯';button.setAttribute('aria-label',label+'：更多操作');button.title=label+'：更多操作 / 编辑知识';button.setAttribute('aria-haspopup','menu');button.setAttribute('aria-expanded','false');button.onclick=action;return button;}
 function contextKey(event){return event.key==='ContextMenu'||(event.shiftKey&&event.key==='F10');}
-function entityContextMenu(event,n){beginGraphMenu(event);menuMessage(n.id);menuAction(n.type==='Claim'?'编辑论断 / 个人记忆':'编辑实体 / 个人记忆',()=>window.KnowledgeEditor?.openEntity(n.id));positionGraphMenu();graphMenu.querySelector('button').focus();}
+const memoryInclusions=new Set();
+async function includeEntityMemory(n){
+  if(memoryInclusions.has(n.id))return;
+  memoryInclusions.add(n.id);info.setAttribute('role','status');info.textContent='正在纳入个人记忆：'+n.id;
+  try{
+    const response=await fetch(apiUrl('/api/memory',{}));
+    if(!response.ok)throw new Error('无法读取个人记忆，请稍后重试。');
+    const data=await response.json();
+    const row=(data.records||[]).find(r=>r.current&&['entity','claim'].includes(r.snapshot.kind)&&r.snapshot.title===n.id);
+    if(!row)throw new Error('该实体已变更或删除，请刷新图谱后重试。');
+    const saved=await fetch(apiUrl('/api/memory/review',{}),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:row.key,revision:row.revision,reviewed:true,included:true,stance:row.stance,note:row.note,source_id:''})});
+    const result=await saved.json();
+    if(!saved.ok)throw new Error(result.error||'保存失败，请重试。');
+    info.textContent=n.id+' · 已审核，已纳入个人记忆并保存。';
+  }catch(error){info.textContent=n.id+' · 纳入个人记忆失败：'+error.message;}
+  finally{memoryInclusions.delete(n.id);}
+}
+function entityContextMenu(event,n){beginGraphMenu(event);menuMessage(n.id);menuAction('纳入个人记忆',()=>includeEntityMemory(n)).disabled=memoryInclusions.has(n.id);menuAction(n.type==='Claim'?'编辑论断 / 个人记忆':'编辑实体 / 个人记忆',()=>window.KnowledgeEditor?.openEntity(n.id));positionGraphMenu();graphMenu.querySelector('button:not(:disabled)').focus();}
 async function relationContextMenu(event,relation){
   const version=beginGraphMenu(event);const s=relation.s||relation.subject||relation.source?.id,t=relation.t||relation.object||relation.target?.id,p=relation.predicate||relation.p;
   menuMessage(s+' → '+p+' → '+t);menuMessage('正在查找来源…');positionGraphMenu();graphMenu.tabIndex=-1;graphMenu.focus();

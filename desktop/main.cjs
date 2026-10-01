@@ -3,12 +3,31 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
-const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'runtime.json'), 'utf8'));
+let config = {};
 const origin = 'http://127.0.0.1:8765';
 let win, tray, backend, quitting = false, log;
 const loginOptions = { path: process.execPath, args: ['--background'] };
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
+async function loadConfiguration() {
+  const saved = path.join(app.getPath('userData'), 'runtime.json');
+  const bundled = path.join(__dirname, 'runtime.json');
+  for (const file of [saved, bundled]) {
+    if (fs.existsSync(file)) {
+      try { config = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { continue; }
+      if (!config || typeof config !== 'object') { config = {}; continue; }
+      if (fs.existsSync(path.join(config.projectRoot || '', 'src', 'ontokb', 'cli.py')) && fs.existsSync(config.python || '')) return;
+    }
+  }
+  const project = await dialog.showOpenDialog({ title: '选择 OntoKB 项目目录（需先安装 Python 依赖）', properties: ['openDirectory'] });
+  if (project.canceled) throw new Error('尚未配置 OntoKB 项目目录。');
+  const projectRoot = project.filePaths[0];
+  if (!fs.existsSync(path.join(projectRoot, 'src', 'ontokb', 'cli.py'))) throw new Error('所选目录不是 OntoKB 项目根目录。');
+  const python = await dialog.showOpenDialog({ title: '选择已安装 OntoKB 依赖的 python.exe', properties: ['openFile'], filters: [{ name: 'Python', extensions: ['exe'] }] });
+  if (python.canceled) throw new Error('尚未配置 Python。');
+  config = { projectRoot, python: python.filePaths[0] };
+  fs.writeFileSync(saved, JSON.stringify(config, null, 2));
+}
 function health() {
   return new Promise(resolve => {
     const req = http.get(`${origin}/health`, res => {
@@ -69,13 +88,18 @@ function menus() {
       { label: '整理知识', accelerator: 'CmdOrCtrl+Shift+E', click: () => { show(); win?.webContents.executeJavaScript("window.KnowledgeEditor?.open()"); } }
     ] },
     { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
-    { label: '视图', submenu: [{ role: 'reload' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] }]));
+    { label: '视图', submenu: [{ role: 'reload' }, { label: '强制加载最新界面', accelerator: 'CmdOrCtrl+Shift+R', click: async () => {
+      if (!win) return;
+      const answer = await dialog.showMessageBox(win, { type: 'question', message: '重新加载最新界面？', detail: '未保存的正文或聊天草稿会丢失，请先保存。', buttons: ['取消', '重新加载'], defaultId: 0, cancelId: 0 });
+      if (answer.response === 1) win.webContents.reloadIgnoringCache();
+    } }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] }]));
 }
 app.on('second-instance', show);
 app.on('before-quit', () => { quitting = true; if (backend && backend.exitCode === null) backend.kill(); });
 app.on('window-all-closed', () => {});
 if (hasLock) app.whenReady().then(async () => {
   app.setAppUserModelId('OntoKB.Desktop');
+  await loadConfiguration();
   const pixels = Buffer.alloc(32 * 32 * 4);
   for (let i = 0; i < pixels.length; i += 4) { pixels[i] = 190; pixels[i+1] = 120; pixels[i+2] = 45; pixels[i+3] = 255; }
   tray = new Tray(nativeImage.createFromBitmap(pixels, { width: 32, height: 32 }));

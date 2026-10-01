@@ -14,3 +14,13 @@ vault/.obsidian/workspace*
 ~$*
 .playwright-cli/
 output/playwright/
+
+# Local knowledge, viewing history, transcripts, and workspace state.
+.obsidian/
+data/**
+!data/.gitkeep
+vault/**
+!vault/**/
+!vault/**/.gitkeep
+# Historical tracked takeout.csv is unchanged; prevent other local exports.
+config/*takeout*.csv
