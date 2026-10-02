@@ -1,0 +1,39 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Generated media and subtitles
+*.mp4
+*.mov
+*.m4a
+*.wav
+*.aac
+*.srt
+*.ass
+
+# Generated plans and outputs
+clip_plan.csv
+cut_plan.csv
+cut_plan_new.csv
+remove_ranges.txt
+shorts_plan.csv
+keep_plan.csv
+shorts_out/
+*.openai_chunks/
+
+# Keep documentation examples
+!examples/
+!examples/clip_plan.csv
+!examples/remove_ranges.txt
+!examples/shorts_plan.csv
+
+# Local logs and temp files
+*.log
+tmp/
+temp/
+node_modules/
+dist/
+runtime/
+.build-cache/
+.venv/
+output/

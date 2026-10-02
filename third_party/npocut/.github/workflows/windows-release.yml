@@ -1,0 +1,27 @@
+name: Windows release
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run dist:win
+      - run: node scripts/smoke-electron.mjs dist/win-unpacked/npocut.exe
+      - name: Publish versioned release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $assets = Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' }
+          $assets | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content dist/SHA256SUMS.txt
+          gh release create "v$version" $assets.FullName dist/SHA256SUMS.txt --target $env:GITHUB_SHA --title "npocut $version for Windows" --notes-file RELEASE_NOTES.md

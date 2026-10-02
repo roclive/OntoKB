@@ -75,7 +75,7 @@ class GraphApiHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "app_id": "ontokb",
                     "ui_version": "reading-v1",
-                    "features": {"article_summary": True, "summary_walk": True,
+                    "features": {"article_summary": True, "summary_walk": True, "media_walk": True,
                                  "transcript_validation": True, "chat_history": True, "knowledge_tools": True,
                                  "knowledge_editor": True, "personal_memory": True, "judgment_comparison": True},
                     "chat": True,
@@ -95,6 +95,11 @@ class GraphApiHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/memory":
                 from .memory import MemoryService
                 self._send_json(MemoryService(self.store).bootstrap())
+            elif parsed.path == "/api/media/status":
+                from .media import status
+                self._send_json(status(self.store, params.get('content_id', [''])[0], params.get('mode', ['video'])[0]))
+            elif parsed.path == "/api/media/asset":
+                self._handle_media_asset(params)
             else:
                 self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except ValueError as exc:
@@ -112,7 +117,12 @@ class GraphApiHandler(BaseHTTPRequestHandler):
             self._send_json({'error': 'Content-Type must be application/json'}, HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
             return
         try:
-            if parsed.path in ("/api/memory/review", "/api/memory/compare"):
+            if parsed.path == "/api/media/prepare":
+                from .media import prepare
+                body = self._read_json()
+                self._send_json(prepare(self.store, body.get('content_id'), mode=body.get('mode', 'video'), provider=self.llm_provider,
+                                        model=self.llm_model, fallback_model=self.llm_fallback_model))
+            elif parsed.path in ("/api/memory/review", "/api/memory/compare"):
                 self._handle_memory(parsed.path)
             elif parsed.path.startswith("/api/editor/"):
                 self._handle_editor_mutation(parsed.path)
@@ -136,6 +146,53 @@ class GraphApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": f"保存未完成：{exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             else:
                 self._send_json({"error": f"LLM request failed: {exc}"}, HTTPStatus.BAD_GATEWAY)
+
+    def _handle_media_asset(self, params) -> None:
+        from .media import asset
+        path = asset(self.store, params.get('content_id', [''])[0], params.get('name', [''])[0], params.get('mode', ['video'])[0])
+        size = path.stat().st_size
+        start, end, partial = 0, size - 1, False
+        requested = self.headers.get('Range')
+        if requested:
+            match = re.fullmatch(r'bytes=(\d*)-(\d*)', requested.strip())
+            if not match or not any(match.groups()):
+                self.send_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                return
+            left, right = match.groups()
+            if left:
+                start = int(left)
+                end = min(int(right), end) if right else end
+            else:
+                start = max(0, size - int(right))
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header('Content-Range', f'bytes */{size}')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            partial = True
+        self.send_response(206 if partial else 200)
+        self.send_header('Content-Type', {'.mp4': 'video/mp4', '.m4a': 'audio/mp4', '.jpg': 'image/jpeg'}[path.suffix])
+        if params.get('download') == ['1']:
+            self.send_header('Content-Disposition', f'attachment; filename="ontokb-{path.name}"')
+        self.send_header('Accept-Ranges', 'bytes')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Content-Length', str(end - start + 1))
+        if partial:
+            self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+        self.end_headers()
+        try:
+            with path.open('rb') as stream:
+                stream.seek(start)
+                remaining = end - start + 1
+                while remaining:
+                    chunk = stream.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _handle_memory(self, path: str) -> None:
         from .memory import MemoryService

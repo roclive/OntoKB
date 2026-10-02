@@ -161,3 +161,218 @@ def test_transcribe_with_whisper_uses_downloaded_audio(monkeypatch, tmp_path):
 
     assert text == "第一段\n第二段"
     assert item.duration_seconds == 12
+
+
+def test_vtt_segments_preserve_timing_and_repeated_speech():
+    vtt = ('WEBVTT\n\nintro\n00:01.250 --> 00:03.500 align:start\n'
+           '<c>Hello &amp; welcome</c>\n\n00:05.000 --> 00:07.000\nHello &amp; welcome\n')
+    assert youtube.vtt_to_segments(vtt) == [
+        {'start': 1.25, 'end': 3.5, 'text': 'Hello & welcome'},
+        {'start': 5.0, 'end': 7.0, 'text': 'Hello & welcome'},
+    ]
+
+
+def test_json3_segments_require_real_valid_timestamps():
+    segments = youtube.json3_to_segments({'events': [
+        {'tStartMs': 1200, 'dDurationMs': 2400, 'segs': [{'utf8': 'Hello'}, {'utf8': ' world'}]},
+        {'tStartMs': 10, 'dDurationMs': 0, 'segs': [{'utf8': 'empty duration'}]},
+        {'segs': [{'utf8': 'untimed'}]},
+    ]})
+    assert len(segments) == 1
+    assert segments[0]['start'] == pytest.approx(1.2)
+    assert segments[0]['end'] == pytest.approx(3.6)
+    assert segments[0]['text'] == 'Hello world'
+
+
+def test_fetch_backfills_text_only_cache_with_caption_timestamps(monkeypatch, tmp_path):
+    item = ContentItem(id='yt:CETs0u10aSc', kind='video', source='youtube',
+                       url='https://youtu.be/CETs0u10aSc')
+    youtube._write_cached_transcript(item, 'old cached text', tmp_path, source='legacy')
+
+    class FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def extract_info(self, *args, **kwargs):
+            return {'subtitles': {'en': [{'ext': 'vtt', 'url': 'https://example.test/subs'}]}}
+
+    monkeypatch.setitem(sys.modules, 'yt_dlp', SimpleNamespace(YoutubeDL=FakeYDL))
+    monkeypatch.setattr(youtube.urllib.request, 'urlopen', lambda *args, **kwargs:
+                        io.BytesIO(b'WEBVTT\n\n00:00:02.000 --> 00:00:04.500\nnew timed text'))
+    assert youtube.fetch_transcript(item, cache_dir=tmp_path, require_segments=True) == 'new timed text'
+    assert youtube.read_transcript_segments(item, tmp_path) == [
+        {'start': 2.0, 'end': 4.5, 'text': 'new timed text'}]
+    monkeypatch.setitem(sys.modules, 'yt_dlp', None)
+    assert youtube.fetch_transcript(item, cache_dir=tmp_path, require_segments=True) == 'new timed text'
+
+
+def test_whisper_records_real_segment_times(monkeypatch, tmp_path):
+    monkeypatch.setattr(youtube, '_download_audio', lambda *args, **kwargs: tmp_path / 'audio.m4a')
+
+    class FakeWhisper:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, *args, **kwargs):
+            return iter([SimpleNamespace(start=1.5, end=3.0, text=' speech ')]), SimpleNamespace(duration=4)
+
+    monkeypatch.setitem(sys.modules, 'faster_whisper', SimpleNamespace(WhisperModel=FakeWhisper))
+    item = ContentItem(id='yt:CETs0u10aSc', kind='video', source='youtube', url='https://youtu.be/CETs0u10aSc')
+    segments = []
+    assert youtube._transcribe_with_whisper(item, segment_sink=segments) == 'speech'
+    assert segments == [{'start': 1.5, 'end': 3.0, 'text': 'speech'}]
+
+
+def test_hls_caption_segments_do_not_assume_transport_times_are_video_offsets(monkeypatch):
+    bodies = {
+        'https://example.test/index': '#EXTM3U\na.vtt\nb.vtt',
+        'https://example.test/a.vtt': 'WEBVTT\n\n00:00:01 --> 00:00:03\nfirst',
+        'https://example.test/b.vtt': 'WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:900000\n\n00:00:01 --> 00:00:03\nsecond',
+    }
+    monkeypatch.setattr(youtube.urllib.request, 'urlopen', lambda url, **kwargs: io.BytesIO(bodies[url].encode()))
+    text, segments = youtube._fetch_caption_data('https://example.test/index')
+    assert text == 'first\nsecond'
+    assert segments == []
+    assert youtube.vtt_to_segments(bodies['https://example.test/b.vtt']) == []
+
+
+def test_segment_cache_rejects_invalid_timings(tmp_path):
+    item = ContentItem(id='yt:CETs0u10aSc', kind='video', source='youtube', url='https://youtu.be/CETs0u10aSc')
+    youtube._write_cached_transcript(item, 'text', tmp_path, 'test', segments=[
+        {'start': -1, 'end': 2, 'text': 'negative'},
+        {'start': 1, 'end': float('inf'), 'text': 'infinite'},
+        {'start': 3, 'end': 2, 'text': 'reversed'},
+    ])
+    assert youtube.read_transcript_segments(item, tmp_path) == []
+
+
+@pytest.mark.parametrize('data', [[], {'events': None}, {'events': [None]},
+                                 {'events': [{'segs': None}]},
+                                 {'events': [{'segs': [42]}]},
+                                 {'events': [{'segs': [{'utf8': 42}]}]}])
+def test_malformed_json3_raises_parse_error(monkeypatch, data):
+    monkeypatch.setattr(youtube.urllib.request, 'urlopen', lambda *args, **kwargs:
+                        io.BytesIO(json.dumps(data).encode()))
+    with pytest.raises(ValueError):
+        youtube._fetch_caption_data('https://example.test/subs')
+
+
+def test_concurrent_transcript_cache_writes_use_distinct_temporary_files(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    item = ContentItem(id='yt:CETs0u10aSc', kind='video', source='youtube', url='https://youtu.be/CETs0u10aSc')
+    original_replace = youtube.os.replace
+    barrier = threading.Barrier(2)
+    temporary_paths = []
+    thread_state = threading.local()
+
+    def synchronized_replace(source, target):
+        if not getattr(thread_state, 'started', False):
+            thread_state.started = True
+            temporary_paths.append(source)
+            barrier.wait(timeout=5)
+        original_replace(source, target)
+
+    monkeypatch.setattr(youtube.os, 'replace', synchronized_replace)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(youtube._write_cached_transcript, item, text, tmp_path, 'test')
+                   for text in ['first', 'second']]
+        for future in futures:
+            future.result()
+    assert len(set(temporary_paths)) == 2
+    assert youtube._read_cached_transcript(item, tmp_path) in {'first', 'second'}
+    assert list(tmp_path.glob('*.tmp')) == []
+
+
+def test_transcript_cache_retries_transient_windows_replace_failure(monkeypatch, tmp_path):
+    item = ContentItem(id='yt:CETs0u10aSc', kind='video', source='youtube', url='https://youtu.be/CETs0u10aSc')
+    original_replace = youtube.os.replace
+    calls = []
+    delays = []
+
+    def transient_replace(source, target):
+        calls.append(source)
+        if len(calls) == 1:
+            raise PermissionError('Windows temporary sharing conflict')
+        original_replace(source, target)
+
+    monkeypatch.setattr(youtube.os, 'replace', transient_replace)
+    monkeypatch.setattr(youtube.time, 'sleep', delays.append)
+    youtube._write_cached_transcript(item, 'complete text', tmp_path, 'test')
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert delays == [0.02]
+    assert youtube._read_cached_transcript(item, tmp_path) == 'complete text'
+    assert list(tmp_path.glob('*.tmp')) == []
+
+
+def test_transcript_cache_persistent_replace_failure_is_bounded(monkeypatch, tmp_path):
+    item = ContentItem(id='yt:CETs0u10aSc', kind='video', source='youtube', url='https://youtu.be/CETs0u10aSc')
+    calls = []
+    delays = []
+
+    def denied_replace(source, target):
+        calls.append(source)
+        raise PermissionError('Permanent denial')
+
+    monkeypatch.setattr(youtube.os, 'replace', denied_replace)
+    monkeypatch.setattr(youtube.time, 'sleep', delays.append)
+    with pytest.raises(PermissionError):
+        youtube._write_cached_transcript(item, 'text', tmp_path, 'test')
+    assert len(calls) == 6
+    assert len(delays) == 5
+    assert list(tmp_path.glob('*.tmp')) == []
+
+
+def test_legacy_entire_transcript_in_short_cue_requires_real_backfill(monkeypatch, tmp_path):
+    item = ContentItem(id='yt:TsS_XuOmX7s', kind='video', source='youtube', url='https://youtu.be/TsS_XuOmX7s')
+    transcript = 'A complete five minute transcript incorrectly assigned to the first cue. ' * 40
+    (tmp_path / 'TsS_XuOmX7s.json').write_text(json.dumps({
+        'source': 'caption:en', 'duration_seconds': 315, 'raw_text': transcript,
+        'segments': [{'start': .259, 'end': 3.309, 'text': transcript}],
+    }), encoding='utf-8')
+    assert youtube.read_transcript_segments(item, tmp_path) == []
+    assert youtube._read_cached_transcript(item, tmp_path) == transcript
+
+    class FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def extract_info(self, *args, **kwargs):
+            return {'duration': 315, 'subtitles': {'en': [{'ext': 'vtt', 'url': 'https://example.test/subs'}]}}
+
+    monkeypatch.setitem(sys.modules, 'yt_dlp', SimpleNamespace(YoutubeDL=FakeYDL))
+    monkeypatch.setattr(youtube.urllib.request, 'urlopen', lambda *a, **kw: io.BytesIO(
+        b'WEBVTT\n\n00:00:00.259 --> 00:00:03.309\nFirst real sentence\n\n00:04:00.000 --> 00:04:05.000\nLater real sentence'))
+    youtube.fetch_transcript(item, cache_dir=tmp_path, require_segments=True)
+    assert youtube.read_transcript_segments(item, tmp_path) == [
+        {'start': .259, 'end': 3.309, 'text': 'First real sentence'},
+        {'start': 240, 'end': 245, 'text': 'Later real sentence'},
+    ]
+
+
+def test_plausibility_guard_preserves_short_fast_cues_numbers_and_long_normal_cues():
+    segments = [
+        {'start': 0, 'end': .1, 'text': '2026 10 02 1234567890'},
+        {'start': 1, 'end': 1.01, 'text': '短字幕'},
+        {'start': 2, 'end': 22, 'text': ('A reasonably long caption with spoken context. ' * 15).strip()},
+    ]
+    assert youtube._valid_segments(segments) == segments
+
+
+def test_corrupted_long_cue_invalidates_whole_timeline_not_partial_clip_selection():
+    segments = [{'start': 0, 'end': 2, 'text': 'Normal introduction'},
+                {'start': 3, 'end': 6, 'text': 'Entire transcript ' * 100}]
+    assert youtube._valid_segments(segments) == []

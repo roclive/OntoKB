@@ -1,8 +1,10 @@
 # OntoKB Windows 桌面程序
 
-## 0.2.1 GitHub Release
+## 0.3.0 GitHub Release
 
 分发版本首次启动选择项目目录和 Python；运行配置保存于 `%APPDATA%/OntoKB/runtime.json`。菜单“视图 → 强制加载最新界面”（Ctrl+Shift+R）在确认草稿已保存后刷新网页。后端修改仍需重启后端。
+
+0.3.0 加入视频精剪与原声漫游：原视频声音、截图、中文字幕和文章摘要同步，支持图谱双向定位、跨片段进度拖动，以及截图区域高度调整。
 
 在 `desktop` 目录执行 `npm ci`，然后在项目根目录通过 PowerShell 7 执行 `./desktop/release.ps1` 生成干净的 ZIP 和 SHA256SUMS。发布构建仅复制 `main.cjs` 和包元数据，不包含本机 `runtime.json`、业务数据或凭证。首次部署及外部 Python 依赖见 [RELEASE.md](RELEASE.md)。
 

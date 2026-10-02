@@ -217,6 +217,32 @@ $('chat-open').onclick=()=>{
   $('chat-input').focus();
 };
 $('article-dialog').addEventListener('close',()=>{if(articleBusy)$('article-status').textContent='正在后台生成，请勿重复提交。';});
+// Main reading/graph split is independent of the assistant drawer width.
+(()=>{
+  const workspace=$('workspace'),reader=workspace.querySelector('.reader');
+  const handle=document.createElement('div');handle.id='reading-resizer';handle.tabIndex=0;
+  handle.setAttribute('role','separator');handle.setAttribute('aria-orientation','vertical');
+  handle.setAttribute('aria-label','调整阅读栏与图谱宽度');handle.setAttribute('aria-controls','reading-body');
+  handle.title='拖动调整左右栏宽度 · 双击恢复默认 · 方向键微调';reader.append(handle);
+  let preferred=0;
+  try{preferred=Number(localStorage.getItem('readingPaneWidth'))||0;}catch{}
+  const limits=()=>({min:240,max:Math.max(240,workspace.clientWidth-300)});
+  function apply(width,persist=false){
+    if(innerWidth<=720)return;
+    const {min,max}=limits();const size=Math.round(Math.max(min,Math.min(max,width)));
+    workspace.style.gridTemplateColumns=size+'px minmax(0,1fr)';
+    handle.setAttribute('aria-valuemin',min);handle.setAttribute('aria-valuemax',max);handle.setAttribute('aria-valuenow',size);
+    if(persist){preferred=size;try{localStorage.setItem('readingPaneWidth',String(size));}catch{}}
+  }
+  function restore(){workspace.style.gridTemplateColumns='';apply(preferred||reader.getBoundingClientRect().width);}
+  handle.onpointerdown=e=>{if(e.button!==0)return;e.preventDefault();stopTour();handle.focus();handle.setPointerCapture(e.pointerId);document.body.classList.add('resizing-reading');};
+  handle.onpointermove=e=>{if(handle.hasPointerCapture(e.pointerId))apply(e.clientX-workspace.getBoundingClientRect().left,true);};
+  const finish=e=>{if(handle.hasPointerCapture(e.pointerId))handle.releasePointerCapture(e.pointerId);document.body.classList.remove('resizing-reading');};
+  handle.onpointerup=finish;handle.onpointercancel=finish;handle.onlostpointercapture=()=>document.body.classList.remove('resizing-reading');
+  handle.ondblclick=()=>{preferred=0;try{localStorage.removeItem('readingPaneWidth');}catch{}restore();};
+  handle.onkeydown=e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();const {min,max}=limits();apply(e.key==='Home'?min:e.key==='End'?max:reader.getBoundingClientRect().width+(e.key==='ArrowLeft'?-1:1)*(e.shiftKey?50:10),true);};
+  window.addEventListener('resize',restore);restore();
+})();
 const resizer=$('workspace-resizer');const savedPanelWidth=Number(localStorage.getItem('graphPanelWidth'));if(savedPanelWidth>=300)$('query-panel').style.setProperty('--panel-width',savedPanelWidth+'px');
 function resizePanel(width){const size=Math.max(300,Math.min(innerWidth*.9,width));$('query-panel').style.setProperty('--panel-width',size+'px');localStorage.setItem('graphPanelWidth',String(size));}
 resizer.onpointerdown=e=>resizer.setPointerCapture(e.pointerId);resizer.onpointermove=e=>{if(resizer.hasPointerCapture(e.pointerId))resizePanel(innerWidth-e.clientX);};resizer.onpointerup=e=>resizer.releasePointerCapture(e.pointerId);resizer.onkeydown=e=>{if(['ArrowLeft','ArrowRight'].includes(e.key))resizePanel($('query-panel').clientWidth+(e.key==='ArrowLeft'?20:-20));};

@@ -28,3 +28,11 @@ h1{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow
 
 .graph-more{pointer-events:auto;display:inline-flex;align-items:center;justify-content:center;min-width:36px;min-height:36px;padding:0 7px;margin-left:8px;vertical-align:middle;font-size:22px;font-weight:600;line-height:1;color:var(--green);background:var(--panel)}.graph-more[aria-expanded=true]{background:#e9efdc;border-color:#a9ba95}.evidence-row{position:relative;padding-right:44px}.evidence-row>.graph-more{position:absolute;right:0;top:8px;margin-left:0}#info{max-width:calc(100% - 56px);overflow-wrap:anywhere}
 @media(pointer:coarse){.graph-more{min-width:44px;min-height:44px}.evidence-row{padding-right:52px;min-height:60px}}
+/* Main reading/graph divider, independent of the assistant drawer. */
+.workspace>.reader{position:relative;min-width:0}
+#reading-resizer{position:absolute;z-index:6;right:-5px;top:0;bottom:0;width:10px;cursor:col-resize;touch-action:none}
+#reading-resizer::after{content:'';position:absolute;left:4px;top:0;bottom:0;width:2px;background:var(--line);transition:background .15s}
+#reading-resizer:hover::after,#reading-resizer:focus-visible::after,.resizing-reading #reading-resizer::after{background:var(--green);width:4px;left:3px}
+#reading-resizer:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
+body.resizing-reading,body.resizing-reading *{cursor:col-resize!important;user-select:none!important}
+@media(max-width:720px){#reading-resizer{display:none}}
