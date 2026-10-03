@@ -77,7 +77,8 @@ class GraphApiHandler(BaseHTTPRequestHandler):
                     "ui_version": "reading-v1",
                     "features": {"article_summary": True, "summary_walk": True, "media_walk": True,
                                  "transcript_validation": True, "chat_history": True, "knowledge_tools": True,
-                                 "knowledge_editor": True, "personal_memory": True, "judgment_comparison": True},
+                                 "knowledge_editor": True, "entity_merge": True, "shared_aliases": True,
+                                 "personal_memory": True, "judgment_comparison": True},
                     "chat": True,
                     "llm_provider": provider,
                     "llm_configured": bool(executable()) if provider == "codex" else bool(os.environ.get(key_name)),
@@ -100,6 +101,8 @@ class GraphApiHandler(BaseHTTPRequestHandler):
                 self._send_json(status(self.store, params.get('content_id', [''])[0], params.get('mode', ['video'])[0]))
             elif parsed.path == "/api/media/asset":
                 self._handle_media_asset(params)
+            elif parsed.path == "/api/media/source":
+                self._handle_media_asset(params, original=True)
             else:
                 self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except ValueError as exc:
@@ -111,9 +114,11 @@ class GraphApiHandler(BaseHTTPRequestHandler):
         if origin and origin != 'null':
             source = urlparse(origin)
             if source.hostname not in {'localhost', '127.0.0.1', '::1'} or source.port != self.server.server_port:
+                self._discard_post_body()
                 self._send_json({'error': '仅允许本机 UI 发起操作'}, HTTPStatus.FORBIDDEN)
                 return
         if self.headers.get_content_type() != 'application/json':
+            self._discard_post_body()
             self._send_json({'error': 'Content-Type must be application/json'}, HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
             return
         try:
@@ -147,9 +152,10 @@ class GraphApiHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": f"LLM request failed: {exc}"}, HTTPStatus.BAD_GATEWAY)
 
-    def _handle_media_asset(self, params) -> None:
-        from .media import asset
-        path = asset(self.store, params.get('content_id', [''])[0], params.get('name', [''])[0], params.get('mode', ['video'])[0])
+    def _handle_media_asset(self, params, original=False) -> None:
+        from .media import asset, source_asset
+        content_id = params.get('content_id', [''])[0]
+        path = source_asset(self.store, content_id) if original else asset(self.store, content_id, params.get('name', [''])[0], params.get('mode', ['video'])[0])
         size = path.stat().st_size
         start, end, partial = 0, size - 1, False
         requested = self.headers.get('Range')
@@ -214,19 +220,39 @@ class GraphApiHandler(BaseHTTPRequestHandler):
         finally:
             _ingest_lock.release()
 
+    def _discard_post_body(self) -> None:
+        # Closing a Windows socket with unread request bytes can reset it before
+        # the browser receives the rejection. Drain bounded bodies, without
+        # waiting indefinitely for a malformed client.
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+        except ValueError:
+            return
+        if not 0 < length <= 1_000_000:
+            return
+        previous_timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(1)
+            self.rfile.read(length)
+        except (OSError, TimeoutError):
+            pass
+        finally:
+            self.connection.settimeout(previous_timeout)
+
     def _handle_editor_mutation(self, path: str) -> None:
         from .assistant import _ingest_lock
         from .editing import EditingConflict, EditingService
         from .pipeline import ROOT, load_config
         from .vault import ObsidianVault
 
-        match = re.fullmatch(r"/api/editor/(entities|triples|changes)/([1-9][0-9]*)(/delete|/undo)?", path)
+        match = re.fullmatch(r"/api/editor/(entities|triples|changes)/([1-9][0-9]*)(/delete|/undo|/merge-preview|/merge)?", path)
         if not match:
             self._send_json({"error": "没有这个编辑操作"}, HTTPStatus.NOT_FOUND)
             return
         resource, identifier, action = match.groups()
         operations = {("entities", None): "update_entity", ("triples", None): "update_triple",
-                      ("triples", "/delete"): "delete_triple", ("changes", "/undo"): "undo"}
+                      ("triples", "/delete"): "delete_triple", ("changes", "/undo"): "undo",
+                      ("entities", "/merge-preview"): "preview_merge", ("entities", "/merge"): "merge_entities"}
         operation = operations.get((resource, action))
         if operation is None:
             self._send_json({"error": "没有这个编辑操作"}, HTTPStatus.NOT_FOUND)

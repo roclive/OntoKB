@@ -75,6 +75,7 @@ class MemoryService:
         targets = self.targets()
         saved = {r['key']: dict(r) for r in self.conn.execute('SELECT * FROM personal_memory')}
         records = []
+        redirects = {r['key']: dict(r) for r in self.conn.execute('SELECT * FROM memory_redirects')}
         for key in dict.fromkeys([*targets, *saved]):
             row = saved.get(key)
             snapshot = json.loads(row['snapshot']) if row else targets[key]
@@ -82,6 +83,8 @@ class MemoryService:
             state['reviewed'], state['included'] = bool(state['reviewed']), bool(state['included'])
             records.append(dict(key=key, snapshot=snapshot, current=key in targets,
                                 current_target_id=targets[key]['target_id'] if key in targets else None,
+                                associated_target_id=redirects.get(key, {}).get('target_id'),
+                                associated_target_kind=redirects.get(key, {}).get('target_kind'),
                                 updated_at=row['updated_at'] if row else '', **state))
         return records
 

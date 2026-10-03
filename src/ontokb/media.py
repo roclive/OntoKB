@@ -80,7 +80,7 @@ def _cached_manifest(directory, mode):
     return None
 
 
-def status(store, content_id, mode='video'):
+def _status(store, content_id, mode='video'):
     _mode(mode)
     row = _record(store, content_id)
     if not _supported(row):
@@ -102,6 +102,27 @@ def status(store, content_id, mode='video'):
     if data:
         return {'status': 'unavailable', 'mode': mode, 'message': '媒体已生成，点击通过 Codex 准备中文字幕与摘要同步；无需重新下载或剪辑。', 'slides': [], 'duration': data.get('duration', 0)}
     return {'status': 'unavailable', 'message': '尚未生成。生成时将下载视频、截图并保留原声片段。', 'slides': [], 'duration': 0}
+
+
+def source_asset(store, content_id):
+    row = _record(store, content_id)
+    if not _supported(row):
+        raise ValueError('这篇资料没有本地原视频。')
+    directory, _ = _directory(store, row)
+    path = _source_path(directory, row)
+    if not path.is_file() or path.is_symlink():
+        raise ValueError('原视频尚未下载完成。')
+    return path
+
+
+def status(store, content_id, mode='video'):
+    result = _status(store, content_id, mode)
+    try:
+        source_asset(store, content_id)
+        result = dict(result, source_video_url='/api/media/source?' + urlencode({'content_id': content_id}))
+    except ValueError:
+        pass
+    return result
 
 
 def prepare(store, content_id, mode='video', **llm_options):

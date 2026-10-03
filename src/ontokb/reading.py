@@ -8,6 +8,12 @@ from urllib.parse import urlparse
 
 from .models import ContentItem
 
+ARTICLE_CATEGORY_CHOICES = ['历史类', 'AI类', '经济类', '科技', '时政', '实证类', '未分类']
+
+
+def normalize_article_category(category: str) -> str:
+    return '历史类' if category.strip() == '历史' else category.strip()
+
 
 def _mentioned(text: str, name: str) -> bool:
     if not name.strip():
@@ -21,7 +27,7 @@ def article_categories(title: str, meta: dict) -> list[str]:
     """Prefer curated categories; otherwise derive browsing tags from metadata."""
     explicit = meta.get('categories')
     if isinstance(explicit, list):
-        labels = list(dict.fromkeys(s.strip() for s in explicit if isinstance(s, str) and s.strip()))
+        labels = list(dict.fromkeys(normalize_article_category(s) for s in explicit if isinstance(s, str) and s.strip()))
         if labels:
             return labels
     text = ' '.join([title, str(meta.get('summary') or ''),
@@ -42,20 +48,31 @@ def set_article_category(graph, body: dict) -> dict:
     content_id, category = body.get('content_id'), body.get('category')
     if not isinstance(content_id, str) or not content_id.strip():
         raise ValueError('请选择一篇文章。')
-    if not isinstance(category, str) or category not in {'历史', '科技', '时政'}:
-        raise ValueError('请选择历史、科技或时政。')
+    if not isinstance(category, str):
+        raise ValueError('请选择有效的文章分类。')
+    category = normalize_article_category(category)
+    if category not in ARTICLE_CATEGORY_CHOICES:
+        raise ValueError('请选择有效的文章分类。')
     if not _ingest_lock.acquire(blocking=False):
         raise ValueError('知识库正在更新，请稍后重试。')
     try:
         with graph.conn:
-            row = graph.conn.execute("SELECT meta FROM contents WHERE id=? AND status='processed'", (content_id,)).fetchone()
+            row = graph.conn.execute("SELECT title,meta FROM contents WHERE id=? AND status='processed'", (content_id,)).fetchone()
             if row is None:
                 raise ValueError('文章不存在或尚未处理完成。')
             meta = json.loads(row['meta'])
-            meta['categories'] = [category]
+            current = article_categories(row['title'] or '', meta)
+            removed = category in current
+            if category == '未分类':
+                categories = ['未分类']
+            elif removed:
+                categories = [label for label in current if label not in {category, '未分类'}] or ['未分类']
+            else:
+                categories = [label for label in current if label != '未分类'] + [category]
+            meta['categories'] = categories
             graph.conn.execute('UPDATE contents SET meta=? WHERE id=?',
                                (json.dumps(meta, ensure_ascii=False), content_id))
-        return {'content_id': content_id, 'categories': [category]}
+        return {'content_id': content_id, 'categories': categories, 'removed': removed}
     finally:
         _ingest_lock.release()
 

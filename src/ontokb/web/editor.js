@@ -5,14 +5,15 @@
   const dialog = el('dialog'); dialog.id = 'knowledge-editor'; dialog.setAttribute('aria-labelledby', 'ke-title');
   dialog.innerHTML = '<div class="ke-shell"><header class="ke-header"><div><div class="eyebrow">CURATE YOUR KNOWLEDGE</div><h2 id="ke-title">整理知识</h2><p>修正实体、核实论断，让每一条连接更准确。</p></div><div class="ke-header-actions"><button type="button" id="ke-history">修改记录</button><button type="button" id="ke-close" aria-label="关闭知识编辑器">×</button></div></header><div class="ke-layout"><aside class="ke-sidebar"><div class="ke-search"><input id="ke-search" type="search" placeholder="搜索名称、别名或关系…" aria-label="搜索知识记录"></div><div class="ke-tabs" role="tablist" aria-label="知识类别"><button role="tab" data-kind="entities" aria-selected="true">实体</button><button role="tab" data-kind="claims" aria-selected="false">论断</button><button role="tab" data-kind="triples" aria-selected="false">关系</button></div><div id="ke-count" class="ke-count" aria-live="polite"></div><div id="ke-list" class="ke-list" aria-label="知识记录"></div></aside><section class="ke-main"><div id="ke-content" class="ke-content"></div><footer class="ke-footer" id="ke-footer"><span id="ke-dirty">选择一条记录，开始整理</span><button type="button" id="ke-delete" class="ke-danger" hidden>删除关系</button><button type="button" id="ke-reset" disabled>重置修改</button><button type="submit" form="ke-form" id="ke-save" class="primary" disabled>保存修改</button></footer></section></div><div id="ke-feedback" class="ke-feedback" role="status" aria-live="polite"></div></div>';
   document.body.append(dialog);
+  const mergeEntry=el('button','','合并实体');mergeEntry.id='ke-merge-open';mergeEntry.type='button';byId('ke-history').before(mergeEntry);
   const articleFilters=el('div','ke-article-filters');
   articleFilters.innerHTML='<label>文章分类<select id="ke-category" aria-label="按文章分类筛选"><option value="">全部分类</option></select></label><label>来源文章<select id="ke-article" aria-label="按来源文章筛选"><option value="">全部文章</option></select></label>';
   dialog.querySelector('.ke-tabs').before(articleFilters);
   let category='',article='',entitySources=new Map();
   function articleSources(){
     // Use the same library as the workbench, including with older running APIs.
-    if(typeof DATA!=='undefined'&&Array.isArray(DATA.library))return DATA.library;
-    return (data.sources||[]).filter(s=>!s.status||s.status==='processed');
+    const sources=typeof DATA!=='undefined'&&Array.isArray(DATA.library)?DATA.library:(data.sources||[]).filter(s=>!s.status||s.status==='processed');
+    return sources.map(s=>({...s,categories:[...new Set((s.categories||['未分类']).map(c=>c==='历史'?'历史类':c))]}));
   }
   function renderArticleFilters(){
     const sources=articleSources();
@@ -48,8 +49,8 @@
     const response = await fetch(apiUrl(path, {}), body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     const result = await response.json(); if (!response.ok) {const error=new Error(result.error || '操作失败，请稍后重试。');error.status=response.status;throw error;} return result;
   }
-  function setBusy(value) { busy = value; dialog.querySelectorAll('input, select, textarea, #ke-confirm button').forEach(n=>n.disabled=value); for(const id of ['ke-memory-scope','ke-memory-review-filter'])byId(id).disabled=value||!memoryData; dialog.setAttribute('aria-busy', String(value)); byId('ke-save').textContent = value ? '正在保存…' : '保存修改'; syncButtons(); }
-  function syncButtons() { byId('ke-save').disabled = busy || memoryDirty || !dirty || !selected; byId('ke-reset').disabled = busy || !dirty; byId('ke-delete').disabled = busy || memoryDirty; if(byId('ke-memory-save'))byId('ke-memory-save').disabled=busy||!memoryDirty||memoryStale; byId('ke-dirty').textContent = busy ? '正在同步知识库…' : memoryDirty ? '● 请先保存或重置个人记忆设置' : dirty ? '● 有尚未保存的知识修改' : selected ? '当前表单没有待保存修改' : '选择一条记录，开始整理'; }
+  function setBusy(value) { busy = value; dialog.querySelectorAll('input, select, textarea, #ke-confirm button, .ke-merge-workspace button, #ke-merge-open').forEach(n=>n.disabled=value); for(const id of ['ke-memory-scope','ke-memory-review-filter'])byId(id).disabled=value||!memoryData; dialog.setAttribute('aria-busy', String(value)); byId('ke-save').textContent = value ? '正在保存…' : '保存修改'; syncButtons(); if(mergeSession){syncMerge();if(!value){renderMergeCandidates('source');renderMergeCandidates('target');}} }
+  function syncButtons() { byId('ke-save').disabled = busy || memoryDirty || !dirty || !selected; byId('ke-reset').disabled = busy || !dirty; byId('ke-delete').disabled = busy || memoryDirty; if(byId('ke-memory-save'))byId('ke-memory-save').disabled=busy||!memoryDirty||memoryStale; byId('ke-dirty').textContent = busy ? '正在同步知识库…' : memoryDirty ? '● 个人记忆修改尚未保存' : dirty ? '● 有尚未保存的知识修改' : selected ? '当前表单没有待保存修改' : '选择一条记录，开始整理'; }
   function values() {
     if (!selected || !byId('ke-form')) return {};
     if (kind === 'triples') return {subject_id:Number(byId('ke-subject').value), object_id:Number(byId('ke-object').value), predicate:byId('ke-predicate').value, confidence:Number(byId('ke-confidence').value)};
@@ -91,8 +92,9 @@
     const search=el('input');search.type='search';search.placeholder='输入名称，筛选实体…';search.setAttribute('aria-label','搜索'+title);search.className='ke-endpoint-search';input.before(search);
     search.addEventListener('input',()=>{const value=input.value;const q=search.value.trim().toLocaleLowerCase();input.replaceChildren();selectOptions(input,options.filter(o=>o.value===value||o.label.toLocaleLowerCase().includes(q)),value);});
   }
-  function evidence(parent, row) {const source=(data.sources||[]).find(s=>String(s.id)===String(row.source));const wrap=el('div','ke-section');wrap.append(el('h4','','原始证据 · 只读'));wrap.append(el('blockquote','ke-evidence',row.evidence||'这条关系尚未保存逐字证据。'));wrap.append(el('div','ke-source','来源：'+(source?.title||row.source||row.source_id||'未记录来源')));parent.append(wrap);}
+  function evidence(parent, row) {const wrap=el('div','ke-section');wrap.append(el('h4','','原始证据 · 只读'));const records=[row,...(row.evidence_records||[])],seen=new Set();for(const record of records){const sourceId=record.source||record.source_id;const key=JSON.stringify([sourceId,record.evidence]);if(seen.has(key))continue;seen.add(key);const source=(data.sources||[]).find(s=>String(s.id)===String(sourceId));const pair=el('div','ke-evidence-pair');pair.append(el('blockquote','ke-evidence',record.evidence||'这条关系尚未保存逐字证据。'),el('div','ke-source','来源：'+(source?.title||sourceId||'未记录来源')));if(record!==row)pair.append(el('div','ke-field-help','合并前的原始证据 · 保留当时记录'));wrap.append(pair);}parent.append(wrap);}
   function select(row) {
+    leaveMerge();
     selected=row;dirty=false;memoryDirty=false; const content=byId('ke-content');content.replaceChildren(); byId('ke-delete').hidden=kind!=='triples';
     content.append(el('div','eyebrow',kind==='triples'?'RELATIONSHIP':'KNOWLEDGE RECORD'));if(row.manual)content.append(el('div','ke-source','人工修订 · 重新抽取时保留'));
     content.append(el('h3','',kind==='triples'?'修正一条连接':row.type==='Claim'?'核实与修正论断':'编辑实体'));
@@ -108,7 +110,8 @@
     } else {
       const name=field(form,row.type==='Claim'?'论断内容':'实体名称','ke-name','input',row.name);name.required=true;name.maxLength=500;name.className='ke-name';name.type='text';name.title='最多 500 个字符';name.addEventListener('input',()=>name.setCustomValidity(/[\r\n]/.test(name.value)?'名称或论断内容不能包含换行。':''));
       const type=field(form,'实体类型','ke-type','select');selectOptions(type,data.types.map(t=>({value:typeof t==='string'?t:t.name,label:typeLabel(typeof t==='string'?t:t.name)})),row.type);
-      field(form,'别名','ke-aliases','textarea',(row.aliases||[]).join('\n'),'每行一个别名，用于搜索与摘要中的名称匹配。');
+      field(form,'别名','ke-aliases','textarea',(row.aliases||[]).join('\n'),'每行一个别名。同一别名可属于多个记录，搜索时会显示候选；统一实体请使用合并。');
+      if(!isDocument(row)){const entry=el('div','ke-merge-entry');entry.append(el('div','','发现多个名称实际指向同一实体？'));const button=el('button','','合并到已有实体 →');button.type='button';button.onclick=()=>guard(()=>showMerge(row.id));entry.append(button);form.append(entry);}
       const reviewWrap=el('div');form.append(reviewWrap);
       function reviewField(){reviewWrap.replaceChildren();if(type.value==='Claim'){const review=field(reviewWrap,'核实状态','ke-review','select');selectOptions(review,(data.review_statuses||['unverified','verified','disputed','refuted']).map(s=>({value:typeof s==='string'?s:s.value||s.name,label:statusLabels[typeof s==='string'?s:s.value||s.name]||s.label||s})),row.verificationStatus||'unverified');}}
       reviewField();type.addEventListener('change',()=>{reviewField();track();});
@@ -129,6 +132,9 @@
     const section=el('section','ke-section ke-memory-section');section.id='ke-memory-section';
     section.append(el('h4','','这条记录的个人记忆'),el('p','ke-field-help','审核＝已检查；收录＝愿意记住。均不代表事实已核实或立场认同，仅作用于当前记录。'));
     byId('ke-content').prepend(section);
+    const targetKind=kind==='triples'?'triple':selected.type==='Claim'?'claim':'entity';
+    const archived=(memoryData?.records||[]).filter(r=>!r.current&&String(r.associated_target_id)===String(selected.id)&&r.associated_target_kind===targetKind);
+    if(archived.length){const history=el('details','ke-associated-memory');history.append(el('summary','','合并关联的历史个人判断 · '+archived.length),el('p','ke-field-help','这些是合并前的判断快照。审核、收录和立场保持原样，不会自动成为当前实体的设置；请重新核对当前记录。'));for(const original of archived){const item=el('div','ke-history-row');item.append(el('strong','',original.snapshot.title||'原始记录'),el('p','ke-field-help',(original.reviewed?'当时已审核':'当时未审核')+' · '+(original.included?'当时纳入个人记忆':'当时仅资料库')+' · '+(stanceLabels[original.stance]||'未表态')),el('p','ke-field-help','当时的判断：'+(original.note||'未填写')));history.append(item);}section.append(history);}
     const row=memoryRecord(selected);
     if(!row){section.append(el('p','ke-source',memoryData?'未找到当前记录的记忆状态，请重新打开编辑器读取最新知识。':'个人记忆暂不可用：'+memoryError));syncButtons();return;}
     const form=el('form');form.id='ke-memory-form';section.append(form);
@@ -139,19 +145,21 @@
     for(const id of ['ke-memory-reviewed','ke-memory-included','ke-memory-stance'])byId(id)?.parentElement.classList.add('ke-memory-short');
     const note=field(form,'我的判断或适用条件','ke-memory-note','textarea',row.note);note.maxLength=4000;
     const source=field(form,'这次判断受哪篇资料影响（可选）','ke-memory-source','select');selectOptions(source,[{value:'',label:'没有指定资料'},...(memoryData.sources||[]).map(s=>({value:s.id,label:s.title||s.id}))],'');
-    const actions=el('div','ke-memory-actions'),save=el('button','primary','保存个人记忆'),reset=el('button','','重置个人记忆设置');save.id='ke-memory-save';save.type='submit';reset.type='button';reset.onclick=()=>{if(!busy)renderMemory();};actions.append(save,reset);form.append(actions);
+    const actions=el('div','ke-memory-actions'),reset=el('button','','放弃未保存的个人记忆修改');reset.type='button';reset.onclick=()=>{if(!busy)renderMemory();};actions.append(reset);form.append(actions);
     const message=el('p','ke-memory-message');message.id='ke-memory-message';message.setAttribute('role','status');section.append(message);
     memoryBaseline=JSON.stringify(memoryValues());
-    const trackMemory=()=>{memoryDirty=JSON.stringify(memoryValues())!==memoryBaseline;syncButtons();};form.addEventListener('input',trackMemory);form.addEventListener('change',trackMemory);
+    const trackMemory=()=>{memoryDirty=JSON.stringify(memoryValues())!==memoryBaseline;syncButtons();};form.addEventListener('input',trackMemory);
+    form.addEventListener('change',()=>{trackMemory();if(memoryDirty&&!busy&&!memoryStale)form.requestSubmit();});
     form.onsubmit=async event=>{
       event.preventDefault();if(busy||!memoryDirty||memoryStale||!form.reportValidity())return;
       const payload={key:row.key,revision:row.revision,...memoryValues()};setBusy(true);message.textContent='正在保存个人记忆…';
       try{
         const result=await request('/api/memory/review',payload);memoryDirty=false;memoryBaseline=JSON.stringify(memoryValues());await reloadMemory();
-        if(memoryData){renderMemory();byId('ke-memory-message').textContent=(result.changed===false?'个人记忆未发生变化，未新增变化记录。':'个人记忆已保存，判断变化已记录。')+'知识内容的修改仍需单独保存。';renderList();}
+        if(memoryData){renderMemory();byId('ke-memory-message').textContent=(result.changed===false?'个人记忆未发生变化，未新增变化记录。':'个人记忆已自动保存，判断变化已记录。')+'知识内容的修改仍需单独保存。';renderList();}
         else {memoryStale=true;message.textContent='个人记忆已保存，但最新状态读取失败。请重新打开编辑器；不要重复提交。';}
       }catch(error){
-        message.textContent=error.message+' 个人记忆设置尚未保存，输入已保留。';
+        message.textContent=error.message+' 自动保存失败，输入已保留。';
+        if(error.status!==409){const retry=el('button','','重试自动保存');retry.type='button';retry.onclick=()=>{if(!busy)form.requestSubmit();};message.append(retry);}
         if(error.status===409){memoryStale=true;const refresh=el('button','','放弃这部分输入并加载最新个人记忆');refresh.type='button';refresh.onclick=async()=>{if(busy)return;setBusy(true);await reloadMemory();if(memoryData){renderMemory();renderList();}else message.textContent='读取失败：'+memoryError+' 输入仍保留。';setBusy(false);};message.append(refresh);}
       }finally{setBusy(false);}
     };
@@ -167,25 +175,85 @@
     if(result.change_id){const undo=el('button','','撤销本次');undo.onclick=()=>guard(()=>undoChange(result.change_id));byId('ke-feedback').append(undo);}
     await refreshGraph();
   }
-  async function save(event) {event.preventDefault();if(busy||!dirty||!selected)return;if(memoryDirty){feedback('请先保存或重置个人记忆设置，再保存知识内容。',true);return;} if(!byId('ke-form').reportValidity())return;const id=selected.id;setBusy(true);feedback('');try{const result=await request('/api/editor/'+(kind==='triples'?'triples':'entities')+'/'+encodeURIComponent(id),{...values(),revision:selected.revision});await complete(result,'已保存，图谱与关联记录已更新。',id);}catch(error){feedback(error.message+' 你的输入已保留。',true);}finally{setBusy(false);}}
+  async function save(event) {event.preventDefault();if(busy||!dirty||!selected)return;if(memoryDirty){feedback('个人记忆修改尚未保存，请完成自动保存或放弃这部分修改后再保存知识内容。',true);return;} if(!byId('ke-form').reportValidity())return;const id=selected.id;setBusy(true);feedback('');try{const result=await request('/api/editor/'+(kind==='triples'?'triples':'entities')+'/'+encodeURIComponent(id),{...values(),revision:selected.revision});await complete(result,'已保存，图谱与关联记录已更新。',id);}catch(error){feedback(error.message+' 你的输入已保留。',true);if(kind!=='triples')aliasConflictAction();}finally{setBusy(false);}}
   async function undoChange(id){setBusy(true);try{const result=await request('/api/editor/changes/'+encodeURIComponent(id)+'/undo',{});await complete({},'已撤销本次修改。',selected?.id);}catch(error){feedback(error.message,true);}finally{setBusy(false);}}
   function showHistory(){
     empty();renderList();const content=byId('ke-content');content.replaceChildren(el('div','eyebrow','EDIT HISTORY'),el('h3','','修改记录'),el('p','ke-subtitle','每次人工修订都有记录。撤销前会检查数据是否已被再次修改。'));
     const records=data.history||[];
     if(!records.length)content.append(el('div','ke-empty','还没有人工修改记录。'));
     for(const row of records.slice(0,50)){
-      const item=el('div','ke-history-row');item.append(el('strong','',({entity:'实体 · ',triple:'关系 · ',delete_triple:'删除关系 · '}[row.kind]||'')+(row.label||({entity:'编辑实体',triple:'编辑关系',delete_triple:'删除关系'}[row.kind]||'知识修改'))));
+      const item=el('div','ke-history-row');item.append(el('strong','',({entity:'实体 · ',triple:'关系 · ',delete_triple:'删除关系 · ',merge_entity:'合并实体 · ',entity_merge:'合并实体 · '}[row.kind]||'')+(row.label||({entity:'编辑实体',triple:'编辑关系',delete_triple:'删除关系',merge_entity:'合并实体',entity_merge:'合并实体'}[row.kind]||'知识修改'))));
       item.append(el('small','',(row.created_at||'')+(row.undone?' · 已撤销':'')));
       for(const change of row.changes||[])item.append(el('p','ke-field-help',change));
       if(row.can_undo){const button=el('button','','撤销此修改');button.type='button';button.onclick=async()=>{if(busy)return;await undoChange(row.id);showHistory();};item.append(button);}
       content.append(item);
     }
   }
-  function empty(){selected=null;dirty=false;memoryDirty=false;byId('ke-delete').hidden=true;byId('ke-content').replaceChildren();const n=el('div','ke-empty');n.append(el('strong','','把知识整理得更清晰。'),el('p','','从左侧选择实体、论断或关系。知识修改可以撤销，个人记忆设置单独保存并记录变化。'));byId('ke-content').append(n);syncButtons();}
+  // Merge is a distinct workspace: selections never mutate knowledge until a server preview is confirmed.
+  let mergeSession=null;
+  const isDocument=row=>['Article','Book','CreativeWork','MediaObject','VideoObject','WebPage','Document'].includes(row?.type);
+  function leaveMerge(){mergeSession=null;dialog.classList.remove('ke-merging');}
+  function mergeMessage(message,error=false){const node=byId('ke-merge-message');if(node){node.textContent=message;node.classList.toggle('error',error);}}
+  function syncMerge(){if(!mergeSession)return;const {sourceId,targetId,preview}=mergeSession;byId('ke-merge-preview').disabled=busy||!sourceId||!targetId||String(sourceId)===String(targetId);const confirm=byId('ke-merge-confirm');if(confirm)confirm.disabled=busy||!preview?.can_merge||!byId('ke-merge-agree')?.checked;}
+  function invalidateMerge(){if(!mergeSession)return;mergeSession.preview=null;byId('ke-merge-result').replaceChildren();mergeMessage('选择完成后，先预览合并结果。');syncMerge();}
+  function mergeCard(parent,row,role){
+    parent.replaceChildren();if(!row){parent.append(el('p','ke-field-help','尚未选择'));return;}
+    parent.append(el('strong','ke-merge-name',row.name),el('span','ke-merge-type',typeLabel(row.type)+' · #'+row.id));
+    const names=el('div','ke-merge-aliases');for(const alias of row.aliases||[])names.append(el('span','',alias));if(!names.childNodes.length)names.append(el('span','ke-field-help','暂无别名'));parent.append(names);
+    const relations=data.triples.filter(t=>String(t.subject_id)===String(row.id)||String(t.object_id)===String(row.id));
+    const sourceIds=[...new Set([...(row.sources||[]),...relations.map(t=>t.source)].filter(Boolean).map(String))];
+    parent.append(el('p','ke-field-help',relations.length+' 条关系 · '+sourceIds.length+' 篇来源'));
+    const details=el('details');details.append(el('summary','','查看关系与出处'));const list=el('div','ke-merge-details');relations.slice(0,8).forEach(t=>list.append(el('p','',tripleTitle(t))));sourceIds.slice(0,8).forEach(id=>list.append(el('p','ke-source','出处：'+((data.sources||[]).find(s=>String(s.id)===id)?.title||id))));if(!relations.length&&!sourceIds.length)list.append(el('p','ke-field-help','暂无关系或出处'));details.append(list);parent.append(details);
+    parent.append(el('p','ke-merge-role',role==='source'?'合并后，此记录归入右侧实体，名称成为别名。':'保留此实体的正式名称、类型和编号。'));
+  }
+  function renderMergeCandidates(side){
+    if(!mergeSession)return;const q=byId('ke-merge-'+side+'-search').value.trim().toLocaleLowerCase();const list=byId('ke-merge-'+side+'-list');list.replaceChildren();
+    const rows=data.entities.filter(row=>!isDocument(row)&&(row.name+' '+(row.aliases||[]).join(' ')).toLocaleLowerCase().includes(q));
+    const current=mergeSession[side+'Id'],other=mergeSession[(side==='source'?'target':'source')+'Id'];
+    rows.slice(0,12).forEach(row=>{const button=el('button','ke-merge-candidate');button.type='button';button.disabled=busy||String(row.id)===String(other);button.setAttribute('aria-pressed',String(String(row.id)===String(current)));button.append(el('strong','',row.name),el('small','',typeLabel(row.type)+' · #'+row.id));button.onclick=()=>{if(busy)return;mergeSession[side+'Id']=row.id;invalidateMerge();renderMergeSelections();};list.append(button);});
+    if(!rows.length)list.append(el('p','ke-field-help','没有匹配的实体，试试名称或别名。'));else if(rows.length>12)list.append(el('p','ke-field-help','显示前 12 项；输入关键词缩小范围。'));
+  }
+  function renderMergeSelections(){
+    if(!mergeSession)return;for(const side of ['source','target']){mergeCard(byId('ke-merge-'+side+'-card'),entity(mergeSession[side+'Id']),side);renderMergeCandidates(side);}syncMerge();
+  }
+  function renderMergePreview(preview){
+    const wrap=byId('ke-merge-result');wrap.replaceChildren();wrap.append(el('h4','','合并结果预览'));
+    const target=preview.target||entity(mergeSession.targetId);const outcome=el('div','ke-merge-outcome');outcome.append(el('small','','统一后的正式名称'),el('strong','',target.name));const aliases=el('div','ke-merge-aliases');for(const alias of preview.aliases||[])aliases.append(el('span','',alias));outcome.append(aliases);wrap.append(outcome);
+    const impact=preview.impact||{};const stats=el('div','ke-merge-stats');for(const [label,value] of [['合并前关系',impact.relations_before],['合并后关系',impact.relations_after],['重叠关系',impact.duplicate_relations],['个人记忆记录',impact.memory_records]]){const item=el('div');item.append(el('strong','',String(value??'—')),el('small','',label));stats.append(item);}wrap.append(stats);
+    const sources=preview.sources||[];if(sources.length){const source=el('details');source.append(el('summary','','归并的出处 · '+sources.length));sources.forEach(id=>source.append(el('p','ke-source',(data.sources||[]).find(s=>String(s.id)===String(id))?.title||String(id))));wrap.append(source);}
+    for(const warning of preview.warnings||[])wrap.append(el('p','ke-merge-warning',warning));
+    for(const conflict of preview.property_conflicts||[])wrap.append(el('p','ke-merge-warning','属性差异：'+conflict.field+' · 原记录 '+JSON.stringify(conflict.source)+' → 保留记录 '+JSON.stringify(conflict.target)));
+    for(const reason of preview.blocked_reasons||[])wrap.append(el('p','ke-merge-warning error',reason));
+    if(preview.can_merge){const agree=el('label','ke-merge-agree');const check=el('input');check.type='checkbox';check.id='ke-merge-agree';check.onchange=syncMerge;agree.append(check,document.createTextNode('我已核对出处，确认这是同一个实体。'));wrap.append(agree);const actions=el('div','ke-merge-actions');const confirm=el('button','primary','确认合并');confirm.type='button';confirm.id='ke-merge-confirm';confirm.disabled=true;confirm.onclick=commitMerge;actions.append(confirm,el('span','ke-field-help','合并会记录在修改历史中，可撤销。'));wrap.append(actions);}
+    syncMerge();
+  }
+  async function previewMerge(){
+    if(busy||!mergeSession)return;invalidateMerge();setBusy(true);mergeMessage('正在核对名称、关系、证据与个人记忆…');
+    try{const preview=await request('/api/editor/entities/'+encodeURIComponent(mergeSession.sourceId)+'/merge-preview',{target_id:Number(mergeSession.targetId)});mergeSession.preview=preview;renderMergePreview(preview);mergeMessage(preview.can_merge?'预览已就绪。核对结果后确认合并。':'当前选择无法合并，请检查以下原因。',!preview.can_merge);byId('ke-merge-result').scrollIntoView({block:'start',behavior:reducedMotion.matches?'auto':'smooth'});}catch(error){mergeMessage(error.message,true);}finally{setBusy(false);}
+  }
+  async function commitMerge(){
+    if(busy||!mergeSession?.preview?.can_merge||!byId('ke-merge-agree')?.checked)return;const {sourceId,targetId,preview}=mergeSession;setBusy(true);mergeMessage('正在合并并同步关联记录…');
+    try{const result=await request('/api/editor/entities/'+encodeURIComponent(sourceId)+'/merge',{target_id:Number(targetId),preview_token:preview.preview_token});leaveMerge();kind=result.entity?.type==='Claim'?'claims':'entities';updateTabs();await complete(result,'实体已统一，原名称已归入别名，关系与出处已同步。',targetId);}catch(error){if(mergeSession){invalidateMerge();mergeMessage(error.message+' 请重新预览后再确认。',true);if(error.status===409){try{await reload();renderList();renderMergeSelections();}catch(refreshError){mergeMessage(error.message+' 最新数据读取失败：'+refreshError.message,true);}}}else feedback('合并已提交，但界面刷新失败。请重新打开编辑器查看最新记录。',true);}finally{setBusy(false);}
+  }
+  function showMerge(sourceId,targetId){
+    empty();dialog.classList.add('ke-merging');mergeSession={sourceId:sourceId||null,targetId:targetId||null,preview:null};feedback('');const content=byId('ke-content');content.replaceChildren();const workspace=el('section','ke-merge-workspace');
+    workspace.append(el('div','eyebrow','ENTITY CONSOLIDATION'),el('h3','','让不同名字，归于同一个实体'),el('p','ke-subtitle','选择要归并的记录和保留的实体。先核对预览，再统一别名、关系与出处。'));
+    const steps=el('div','ke-merge-steps');steps.append(el('span','','① 选择两个记录'),el('span','','② 核对合并结果'),el('span','','③ 确认并保存'));workspace.append(steps);
+    const warning=el('p','ke-merge-warning','论断请核对时间、条件和立场；相似文案未必是同一个论断。资料与文章记录不参与实体合并。');workspace.append(warning);
+    const grid=el('div','ke-merge-grid');for(const [side,title,help] of [['source','要归并的记录','该记录的名称将成为别名'],['target','保留的实体','这个名称将成为统一后的正式名称']]){const panel=el('section','ke-merge-panel');panel.append(el('h4','',title),el('p','ke-field-help',help));const search=el('input');search.type='search';search.id='ke-merge-'+side+'-search';search.placeholder='搜索名称或别名…';search.setAttribute('aria-label','搜索'+title);search.oninput=()=>renderMergeCandidates(side);panel.append(search);const card=el('div','ke-merge-card');card.id='ke-merge-'+side+'-card';panel.append(card);const list=el('div','ke-merge-candidates');list.id='ke-merge-'+side+'-list';list.setAttribute('aria-label',title+'候选');panel.append(list);grid.append(panel);}workspace.append(grid);
+    const actions=el('div','ke-merge-actions'),swap=el('button','','交换保留方向'),preview=el('button','primary','预览合并结果');swap.type=preview.type='button';preview.id='ke-merge-preview';swap.onclick=()=>{if(busy)return;[mergeSession.sourceId,mergeSession.targetId]=[mergeSession.targetId,mergeSession.sourceId];invalidateMerge();renderMergeSelections();};preview.onclick=previewMerge;actions.append(swap,preview);workspace.append(actions);
+    const message=el('p','ke-merge-message','选择完成后，先预览合并结果。');message.id='ke-merge-message';message.setAttribute('role','status');workspace.append(message);const result=el('section','ke-merge-result');result.id='ke-merge-result';workspace.append(result);content.append(workspace);renderMergeSelections();renderList();content.scrollTop=0;byId('ke-merge-'+(sourceId?'target':'source')+'-search').focus();
+  }
+  function aliasConflictAction(){
+    const normalize=name=>String(name).normalize('NFKC').trim().toLocaleLowerCase();const attempted=normalize(values().name);const owner=data.entities.find(row=>String(row.id)!==String(selected?.id)&&normalize(row.name)===attempted);
+    if(owner&&selected&&!isDocument(selected)&&!isDocument(owner)){const sourceId=selected.id;const action=el('button','','查看并合并「'+owner.name+'」');action.type='button';action.onclick=()=>guard(()=>showMerge(sourceId,owner.id));byId('ke-feedback').append(action);}
+  }
+  function empty(){leaveMerge();selected=null;dirty=false;memoryDirty=false;byId('ke-delete').hidden=true;byId('ke-content').replaceChildren();const n=el('div','ke-empty');n.append(el('strong','','把知识整理得更清晰。'),el('p','','从左侧选择实体、论断或关系。知识修改可以撤销，个人记忆设置自动保存并记录变化。'));byId('ke-content').append(n);syncButtons();}
   async function open(target){if(dialog.open){guard(()=>resolveTarget(target));return;}lastFocus=document.activeElement;stopTour();dialog.showModal();feedback('正在读取知识库…');empty();try{await reload();renderList();feedback('');resolveTarget(target);byId('ke-search').focus();}catch(error){feedback('无法连接知识库：'+error.message+' 请确认本地 API 服务已启动。',true);}}
   function resolveTarget(target){if(!data)return;if(target?.entity||target?.relation){category="";article="";renderArticleFilters();}if(target?.entity){const row=data.entities.find(e=>e.name===target.entity||String(e.id)===String(target.entity));if(row){kind=row.type==='Claim'?'claims':'entities';updateTabs();byId('ke-search').value='';select(row);return;}}if(target?.relation){const r=target.relation;const row=data.triples.find(t=>r.id != null ? String(r.id)===String(t.id) : entityName(t.subject_id)===(r.s||r.subject)&&entityName(t.object_id)===(r.t||r.object)&&t.predicate===(r.predicate||r.p)&&(!r.source||r.source===t.source));if(row){kind='triples';updateTabs();byId('ke-search').value='';select(row);return;}}renderList();}
   function close(){dialog.close();lastFocus?.focus();}
   byId('ke-history').onclick=()=>guard(()=>{if(data)showHistory();});
+  byId('ke-merge-open').onclick=()=>guard(()=>{if(data)showMerge(kind!=='triples'&&!isDocument(selected)?selected?.id:null);});
   byId('ke-close').onclick=()=>guard(close);dialog.addEventListener('cancel',e=>{e.preventDefault();guard(close);});
   byId('ke-search').addEventListener('input',()=>{if(data)renderList();});
   for(const id of ['ke-category','ke-article'])byId(id).addEventListener('change',()=>{

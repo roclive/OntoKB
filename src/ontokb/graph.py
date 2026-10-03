@@ -28,8 +28,9 @@ CREATE TABLE IF NOT EXISTS entities (
     added_time TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS aliases (
-    norm_alias TEXT PRIMARY KEY,
-    entity_id INTEGER NOT NULL REFERENCES entities(id)
+    norm_alias TEXT NOT NULL,
+    entity_id INTEGER NOT NULL REFERENCES entities(id),
+    PRIMARY KEY(norm_alias, entity_id)
 );
 CREATE TABLE IF NOT EXISTS triples (
     id INTEGER PRIMARY KEY,
@@ -79,6 +80,22 @@ CREATE TABLE IF NOT EXISTS edit_history (
     after_state TEXT NOT NULL,
     created_at TEXT NOT NULL,
     undone INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS triple_evidence (
+    triple_id INTEGER NOT NULL,
+    original_id INTEGER NOT NULL,
+    original TEXT NOT NULL,
+    PRIMARY KEY(triple_id,original_id)
+);
+CREATE TABLE IF NOT EXISTS merged_entities (
+    source_id INTEGER PRIMARY KEY,
+    target_id INTEGER NOT NULL,
+    original TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory_redirects (
+    key TEXT PRIMARY KEY,
+    target_kind TEXT NOT NULL,
+    target_id INTEGER NOT NULL
 );
 """
 
@@ -159,6 +176,12 @@ class GraphStore:
         triple_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(triples)")}
         if "created_at" not in triple_cols:
             self.conn.execute("ALTER TABLE triples ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+        alias_cols = {r['name']: r for r in self.conn.execute('PRAGMA table_info(aliases)')}
+        if alias_cols['entity_id']['pk'] == 0:
+            self.conn.execute('CREATE TABLE aliases_shared (norm_alias TEXT NOT NULL, entity_id INTEGER NOT NULL REFERENCES entities(id), PRIMARY KEY(norm_alias,entity_id))')
+            self.conn.execute('INSERT INTO aliases_shared SELECT norm_alias,entity_id FROM aliases')
+            self.conn.execute('DROP TABLE aliases')
+            self.conn.execute('ALTER TABLE aliases_shared RENAME TO aliases')
         self.conn.commit()
 
     def close(self) -> None:
@@ -221,11 +244,7 @@ class GraphStore:
             properties["verificationStatus"] = "unverified"
         if entity.type in {"Technology", "Topic"}:
             properties.setdefault("termCategory", "technology" if entity.type == "Technology" else "research_topic")
-        # A shared alias is not sufficient evidence to merge distinct identities.
-        for alias in entity.aliases:
-            owner = self._resolve(normalize(alias))
-            if owner is not None and (row is None or owner["id"] != row["id"]):
-                raise OntologyError(f"alias conflict: {alias!r} already belongs to {owner['name']!r}")
+        # Aliases are many-to-many. Sharing a spelling does not merge identities.
         stored_type = incoming_type
         if row is not None:
             current = self.ontology.canonical_class(row["type"])
@@ -251,8 +270,8 @@ class GraphStore:
             properties["reviewStatus"] = "needs_review"
         if row is None:
             cur = self.conn.execute(
-                "INSERT INTO entities (name, norm_name, type, aliases, properties, sources, added_time) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO entities (name, norm_name, type, aliases, properties, sources, added_time, id) "
+                "VALUES (?,?,?,?,?,?,?, (SELECT max(n)+1 FROM (SELECT coalesce(max(id),0) n FROM entities UNION ALL SELECT coalesce(max(source_id),0) n FROM merged_entities)))",
                 (entity.name, norm, stored_type,
                  json.dumps(entity.aliases, ensure_ascii=False),
                  json.dumps(properties, ensure_ascii=False),
@@ -290,13 +309,20 @@ class GraphStore:
         ).fetchone()
         if row:
             return row
-        hit = self.conn.execute(
-            "SELECT entity_id FROM aliases WHERE norm_alias=?", (norm,)
-        ).fetchone()
-        if hit:
-            return self.conn.execute(
-                "SELECT * FROM entities WHERE id=?", (hit["entity_id"],)
-            ).fetchone()
+        # A confirmed merge preserves the former formal identity even when an
+        # unrelated entity happens to use that spelling as a shared alias.
+        for merged in self.conn.execute('SELECT target_id,original FROM merged_entities'):
+            if json.loads(merged['original']).get('norm_name') == norm:
+                target = self.conn.execute('SELECT * FROM entities WHERE id=?', (merged['target_id'],)).fetchone()
+                if target:
+                    return target
+        hits = self.conn.execute(
+            "SELECT e.* FROM entities e JOIN aliases a ON e.id=a.entity_id WHERE a.norm_alias=? ORDER BY e.id", (norm,)
+        ).fetchall()
+        if len(hits) > 1:
+            raise OntologyError('别名对应多个实体，请使用正式名称或在编辑器中选择：' + '、'.join(r['name'] for r in hits))
+        if hits:
+            return hits[0]
         return None
 
     def get_entity(self, name: str) -> Optional[sqlite3.Row]:
@@ -414,7 +440,12 @@ class GraphStore:
             related_ids.add(row["object_id"])
             if row["source"]:
                 source_ids.add(row["source"])
-            edges.append(_edge_dict(row))
+            edge = _edge_dict(row)
+            evidence_records = [json.loads(r['original']) for r in self.conn.execute(
+                'SELECT original FROM triple_evidence WHERE triple_id=? ORDER BY original_id', (row['id'],))]
+            if evidence_records:
+                edge['evidence_records'] = evidence_records
+            edges.append(edge)
             relations.append(
                 {
                     "triple_id": row["id"],
@@ -463,7 +494,7 @@ class GraphStore:
         try:
             self.conn.execute(
                 "INSERT INTO triples (subject_id, predicate, object_id, confidence, source, evidence, created_at, id) "
-                "VALUES (?,?,?,?,?,?,?, (SELECT max(n)+1 FROM (SELECT coalesce(max(id),0) n FROM triples UNION ALL SELECT coalesce(max(triple_id),0) n FROM manual_triples)))",
+                "VALUES (?,?,?,?,?,?,?, (SELECT max(n)+1 FROM (SELECT coalesce(max(id),0) n FROM triples UNION ALL SELECT coalesce(max(triple_id),0) n FROM manual_triples UNION ALL SELECT coalesce(max(original_id),0) n FROM triple_evidence)))",
                 (subj["id"], ontology.canonical_relation(triple.predicate), obj["id"], triple.confidence, source,
                  triple.evidence, created_at),
             )

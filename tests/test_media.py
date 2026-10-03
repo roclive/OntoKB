@@ -207,6 +207,11 @@ def test_background_job_uses_own_connection_and_deduplicates(graph, monkeypatch)
 def test_http_asset_ranges_and_status(graph):
     ready(graph)
     ready(graph, 'audio')
+    row = media._record(graph, 'yt:example')
+    directory, _ = media._directory(graph, row)
+    source = media._source_path(directory, row)
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b'original-video')
     db = graph.conn.execute('PRAGMA database_list').fetchone()[2]
     class Handler(GraphApiHandler):
         def setup(self):
@@ -227,7 +232,15 @@ def test_http_asset_ranges_and_status(graph):
         connection.request('GET', '/api/media/status?content_id=yt%3Aexample')
         response = connection.getresponse()
         assert response.status == 200
-        assert json.loads(response.read())['status'] == 'ready'
+        result = json.loads(response.read())
+        assert result['status'] == 'ready'
+        assert result['source_video_url'] == '/api/media/source?content_id=yt%3Aexample'
+        connection.request('GET', result['source_video_url'], headers={'Range': 'bytes=0-7'})
+        response = connection.getresponse()
+        assert response.status == 206
+        assert response.getheader('Content-Type') == 'video/mp4'
+        assert response.getheader('Content-Range') == 'bytes 0-7/14'
+        assert response.read() == b'original'
         connection.request('GET', '/api/media/asset?content_id=yt%3Aexample&name=0.mp4', headers={'Range': 'bytes=2-5'})
         response = connection.getresponse()
         assert response.status == 206
@@ -283,3 +296,19 @@ def test_real_ffmpeg_preserves_audio_and_creates_screenshot(graph, monkeypatch, 
     assert 'Audio: aac' in probe.stderr
     assert ('Video: h264' in probe.stderr) == (mode == 'video')
     assert source.is_file()
+
+
+def test_original_source_available_without_generated_highlights(graph):
+    with pytest.raises(ValueError, match='下载'):
+        media.source_asset(graph, 'yt:example')
+    assert 'source_video_url' not in media.status(graph, 'yt:example')
+    row = media._record(graph, 'yt:example')
+    directory, _ = media._directory(graph, row)
+    source = media._source_path(directory, row)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b'original')
+    assert media.source_asset(graph, 'yt:example') == source
+    for mode in ['video', 'audio']:
+        assert media.status(graph, 'yt:example', mode)['source_video_url'] == '/api/media/source?content_id=yt%3Aexample'
+    source.unlink()
+    assert 'source_video_url' not in media.status(graph, 'yt:example')

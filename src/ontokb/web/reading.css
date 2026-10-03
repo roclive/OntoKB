@@ -36,3 +36,16 @@ h1{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow
 #reading-resizer:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
 body.resizing-reading,body.resizing-reading *{cursor:col-resize!important;user-select:none!important}
 @media(max-width:720px){#reading-resizer{display:none}}
+/* Compact menu-sized app header. */
+:root{--app-header-height:40px}
+.masthead{height:var(--app-header-height);padding:0 14px;gap:18px}
+.brand{min-width:150px;gap:8px}.brandmark{width:24px;height:24px;border-radius:7px;font-size:19px}.brandname{font-size:20px}.brandname small{font-size:10px;margin-left:8px}
+.topnav{gap:16px}.topnav button{padding:8px 0;font-size:12px}
+.actions{gap:6px}.masthead .actions button{font-size:11px;padding:4px 9px;white-space:nowrap}
+.workspace{height:calc(100vh - var(--app-header-height))}.drawer{top:var(--app-header-height)}
+.tour-dock{padding:8px 12px;bottom:12px;border-radius:10px}.tour-controls button{padding:4px 8px}.tour-controls #tour-play{min-width:80px}.tour-dock .track{margin-top:7px}.tour-bottom{margin-top:5px}.legend{bottom:105px}#graph{bottom:125px}
+@media(max-width:1000px){.masthead{padding:0 10px;gap:10px}.brand{min-width:110px}.topnav{gap:10px}.masthead .actions button{padding:4px 6px}}
+@media(max-width:720px){.masthead{height:40px}.workspace{height:auto}.drawer{top:40px}.masthead .brandmark{display:none}.masthead .actions{gap:3px}.masthead .actions button{font-size:10px;padding:4px}.brand{min-width:0}}
+/* Keep the original button shapes while reducing their vertical footprint. */
+.masthead .actions button{font-size:12px;padding:4px 11px;border-radius:9px;min-height:28px}
+.topnav button{font-size:12px;padding:8px 0}

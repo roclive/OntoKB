@@ -104,9 +104,9 @@ function reset(){
   if(!node)return;activeIds=new Set();activeKeys=new Set();node.classed('active',false).style('opacity',1);link.classed('active',false).style('opacity',.3);edgeLabel.style('opacity',0);info.textContent='点击节点后用 ⋯ 编辑，点击关系打开菜单；拖动节点，滚轮缩放。';
 }
 function visibleType(n){const l=layerFilter.value;return(typeFilter.value==='all'||n.type===typeFilter.value)&&(l==='all'||l==='claims'&&n.type==='Claim'||l==='documents'&&['VideoObject','Article','Book','CreativeWork','MediaObject'].includes(n.type)||l==='core'&&!['Claim','VideoObject','Article','Book','CreativeWork','MediaObject'].includes(n.type));}
-function applyFilters(){
-  stopTour();mode='explore';setNav();reset();if(!node)return;
-  const ids=new Set(nodes.filter(visibleType).map(n=>n.id));node.style('display',n=>ids.has(n.id)?null:'none');link.style('display',e=>ids.has(e.source.id)&&ids.has(e.target.id)?null:'none');edgeHit.style('display',e=>ids.has(e.source.id)&&ids.has(e.target.id)?null:'none');edgeLabel.style('opacity',0);$('canvas-title').textContent='从一个实体，探索更多。';$('stat').textContent=ids.size+' / '+nodes.length+' 节点';fitView();
+function applyFilters({preserveView=false}={}){
+  stopTour();if(preserveView&&svg)svg.interrupt();mode='explore';setNav();reset();if(!node)return;
+  const ids=new Set(nodes.filter(visibleType).map(n=>n.id));node.style('display',n=>ids.has(n.id)?null:'none');link.style('display',e=>ids.has(e.source.id)&&ids.has(e.target.id)?null:'none');edgeHit.style('display',e=>ids.has(e.source.id)&&ids.has(e.target.id)?null:'none');edgeLabel.style('opacity',0);$('canvas-title').textContent='从一个实体，探索更多。';$('stat').textContent=ids.size+' / '+nodes.length+' 节点';if(!preserveView)fitView();
 }
 function highlight(id){
   const nearby=links.filter(e=>e.source.id===id||e.target.id===id);const ids=new Set([id]);nearby.forEach(e=>{ids.add(e.source.id);ids.add(e.target.id);});paint(ids,new Set(nearby.map(e=>edgeKey(e.source.id,e.p,e.target.id))));focusCamera(ids);info.textContent=id+' · '+nearby.length+' 条已有关系';const selectedNode=nodes.find(n=>n.id===id)||{id};info.append(moreMenuButton(selectedNode.type==='Claim'?'论断':'实体',event=>entityContextMenu(event,selectedNode)));
@@ -139,11 +139,12 @@ function chooseDocument(id){
     $('document-categories').append(tag);
   });
   if(currentDoc){
-    ['历史','科技','时政'].forEach(category=>{
+    ['历史类','AI类','经济类','科技','时政'].forEach(category=>{
       const button=document.createElement('button');button.type='button';button.className='category-assign';
-      button.textContent=category;button.title='将当前文章分类为'+category;
-      button.setAttribute('aria-label','将当前文章分类为'+category);
-      button.setAttribute('aria-pressed',String(categoriesOf(currentDoc).includes(category)));
+      const assigned=categoriesOf(currentDoc).includes(category);
+      button.textContent=category;button.title=assigned?'取消当前文章的'+category+'分类':'将当前文章分类为'+category;
+      button.setAttribute('aria-label',button.title);
+      button.setAttribute('aria-pressed',String(assigned));
       button.disabled=categorySaving;button.onclick=()=>assignCategory(category);
       $('document-categories').append(button);
     });
@@ -171,11 +172,11 @@ async function assignCategory(category){
     const result=await response.json();if(!response.ok)throw new Error(result.error||'保存失败');
     const doc=(DATA.library||[]).find(d=>d.id===id);if(doc)doc.categories=result.categories;
     categorySaving=false;renderLibrary(currentDoc?.id);
-    if(currentDoc?.id===id){status.textContent='已分类为'+category;$('document-categories').append(status);}
+    if(currentDoc?.id===id){status.textContent=result.removed?'已取消'+category+'分类':'已添加'+category+'分类';$('document-categories').append(status);}
   }catch(error){status.textContent='分类未保存：'+error.message;if(currentDoc?.id===id)$('document-categories').append(status);}
   finally{categorySaving=false;document.querySelectorAll('.category-assign').forEach(button=>button.disabled=false);}
 }
-function categoriesOf(doc){return doc.categories?.length?doc.categories:['未分类'];}
+function categoriesOf(doc){return doc.categories?.length?[...new Set(doc.categories.map(c=>c==='历史'?'历史类':c))]:['未分类'];}
 function renderLibrary(preferId){
   const library=DATA.library||[];
   const categories=[...new Set(library.flatMap(categoriesOf))];
@@ -204,7 +205,7 @@ function renderLibrary(preferId){
 $('document-select').onchange=e=>chooseDocument(e.target.value);
 $('tour-play').onclick=()=>{if(playing)return stopTour();if(!currentDoc?.steps.length)return;if(stepIndex===currentDoc.steps.length-1)selectStep(0);mode='reading';selectStep(stepIndex,true);playing=true;$('tour-play').textContent='Ⅱ 暂停漫游';schedule();};
 $('tour-prev').onclick=()=>selectStep(stepIndex-1);$('tour-next').onclick=()=>selectStep(stepIndex+1);$('tour-speed').onchange=()=>{if(playing)schedule();};
-$('reading-nav').onclick=()=>selectStep(stepIndex);$('explore-nav').onclick=()=>{layerFilter.value='all';typeFilter.value='all';applyFilters();};
+$('reading-nav').onclick=()=>selectStep(stepIndex);$('explore-nav').onclick=()=>{closeGraphMenu();$('evidence-panel').hidden=true;applyFilters({preserveView:true});};
 $('fit-view').onclick=fitView;$('filter-toggle').onclick=()=>$('filters').classList.toggle('open');layerFilter.onchange=applyFilters;typeFilter.onchange=applyFilters;
 $('search').oninput=e=>{stopTour();const q=e.target.value.trim().toLowerCase();if(!q){if(mode==='reading')selectStep(stepIndex);else applyFilters();return;}const ids=new Set(nodes.filter(n=>n.id.toLowerCase().includes(q)).map(n=>n.id));paint(ids,new Set());if(ids.size)focusCamera(ids);info.textContent='匹配 '+ids.size+' 个实体';};
 $('evidence-open').onclick=()=>$('evidence-panel').hidden=!$('evidence-panel').hidden;$('evidence-close').onclick=()=>$('evidence-panel').hidden=true;

@@ -69,7 +69,7 @@ def test_rename_keeps_identity_alias_resolution_and_updates_neighbor_notes(edito
 
 
 @pytest.mark.parametrize("payload", [
-    {"name": "Anthropic"}, {"aliases": ["Claude company"]}, {"name": "  "},
+    {"name": "Anthropic"}, {"name": "  "},
     {"type": "UnknownType"}, {"type": "Person"},
 ])
 def test_invalid_entity_edit_is_atomic(editor, payload):
@@ -373,7 +373,8 @@ def test_http_bootstrap_edit_stale_revision_and_immutable_evidence(editor_http):
         assert status == 400
         assert _edge(graph) == triple
     status, _ = request(path, {"aliases": ["Claude company"]})
-    assert status == 400
+    assert status == 200
+    assert {r['name'] for r in graph.search_entities('Claude company', mode='phrase')} == {'Renamed company', 'Anthropic'}
 
 
 def test_http_delete_undo_and_mutation_guards(editor_http):

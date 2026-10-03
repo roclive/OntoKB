@@ -41,9 +41,10 @@ def test_conflict_does_not_pollute_existing_entity_or_aliases():
         g.upsert_entity(ExtractedEntity(name='Example', type='Person', aliases=['bad alias']))
     assert g.get_entity('Example')['type'] == 'Organization'
     assert g.get_entity('bad alias') is None
-    with pytest.raises(OntologyError, match='alias conflict'):
-        g.upsert_entity(ExtractedEntity(name='Different', type='Organization', aliases=['Example']))
-    assert g.get_entity('Different') is None
+    different = g.upsert_entity(ExtractedEntity(name='Different', type='Organization', aliases=['Example']))
+    assert g.get_entity('Different')['id'] == different
+    assert g.get_entity('Example')['name'] == 'Example'  # Formal names take priority.
+    assert {e['name'] for e in g.search_entities('Example', mode='phrase')} == {'Example', 'Different'}
     g.close()
 
 

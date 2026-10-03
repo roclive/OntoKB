@@ -15,6 +15,7 @@ from .models import ExtractedTriple
 from .ontology import OntologyError
 from .reading import article_categories
 from .vault import slugify
+from .entity_merge import EntityMergeMixin
 
 REVIEW_STATUSES = ['unverified', 'verified', 'disputed', 'refuted']
 
@@ -56,7 +57,7 @@ def source_triples(graph, source, knowledge_only=False):
                                          and r['predicate'] in ('mentions', 'about'))]
 
 
-class EditingService:
+class EditingService(EntityMergeMixin):
     def __init__(self, graph, vault=None):
         self.graph, self.vault = graph, vault
         self.conn, self.ontology = graph.conn, graph.ontology
@@ -81,6 +82,8 @@ class EditingService:
             edge.update(revision=_revision(row), subject=names[row['subject_id']]['name'],
                         object=names[row['object_id']]['name'],
                         manual=bool(self.conn.execute('SELECT 1 FROM manual_triples WHERE triple_id=?', (row['id'],)).fetchone()))
+            edge['evidence_records'] = [json.loads(r['original']) for r in self.conn.execute(
+                'SELECT original FROM triple_evidence WHERE triple_id=? ORDER BY original_id', (row['id'],))]
             triples.append(edge)
         latest = self.conn.execute('SELECT max(id) FROM edit_history WHERE undone=0').fetchone()[0]
         history = []
@@ -91,6 +94,8 @@ class EditingService:
             before = state['row']
             after_state = json.loads(row['after_state'])
             changes = []
+            if row['kind'] == 'entity_merge':
+                changes.append(f"已合并到：{after_state['row']['name']}；原名称、出处、证据及个人判断保留。")
             if after_state is None:
                 changes.append('已移除关系，原始记录保留在修改历史中。')
             else:
@@ -145,9 +150,9 @@ class EditingService:
     def _validate_name(self, name, ident, *, note_name=True):
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 500 or any(ord(c) < 32 for c in name):
             raise EditingError('名称需为 1–500 个字符，不能包含换行或控制字符。')
-        owner = self.graph.get_entity(name)
+        owner = self.conn.execute('SELECT * FROM entities WHERE norm_name=?', (normalize(name),)).fetchone() if note_name else None
         if owner and owner['id'] != ident:
-            raise EditingError('名称或别名已属于另一个实体：' + owner['name'])
+            raise EditingError('正式名称已属于另一个实体：' + owner['name'])
         if self.vault and note_name:
             for row in self.conn.execute('SELECT id,name FROM entities WHERE id<>?', (ident,)):
                 if slugify(row['name']).casefold() == slugify(name).casefold():
@@ -226,7 +231,7 @@ class EditingService:
             self.conn.execute('UPDATE entities SET name=?,norm_name=?,type=?,aliases=?,properties=? WHERE id=?', (name, normalize(name), kind, _json(aliases), _json(props), ident))
             self.conn.execute('DELETE FROM aliases WHERE entity_id=?', (ident,))
             for alias in set(aliases + originals):
-                self.conn.execute('INSERT INTO aliases VALUES(?,?) ON CONFLICT(norm_alias) DO UPDATE SET entity_id=excluded.entity_id', (normalize(alias), ident))
+                self.conn.execute('INSERT OR IGNORE INTO aliases VALUES(?,?)', (normalize(alias), ident))
             after = self._snapshot('entities', ident)
             change = self._audit('entity', ident, before, after)
             affected = {ident}
@@ -284,6 +289,8 @@ class EditingService:
             if history is None or history['id'] != change_id:
                 raise EditingConflict('只能撤销最近一次尚未撤销的修改。')
             before, after = json.loads(history['before_state']), json.loads(history['after_state'])
+            if history['kind'] == 'entity_merge':
+                return self._undo_merge(history, before, after)
             row = before['row']
             table = 'entities' if history['kind'] == 'entity' else 'triples'
             ident = history['target_id']
@@ -299,10 +306,7 @@ class EditingService:
                 row['sources'] = current['sources']
                 self.conn.execute('DELETE FROM aliases WHERE entity_id=?', (ident,))
                 for alias in before['aliases']:
-                    owner = self.graph.get_entity(alias)
-                    if owner and owner['id'] != ident:
-                        raise EditingConflict('别名已被其他实体使用，无法撤销。')
-                    self.conn.execute('INSERT INTO aliases VALUES(?,?)', (alias, ident))
+                    self.conn.execute('INSERT OR IGNORE INTO aliases VALUES(?,?)', (alias, ident))
                 for edge in self.conn.execute('SELECT t.*,s.type st,o.type ot FROM triples t JOIN entities s ON s.id=t.subject_id JOIN entities o ON o.id=t.object_id WHERE t.subject_id=? OR t.object_id=?', (ident, ident)):
                     self.ontology.validate_triple(row['type'] if edge['subject_id'] == ident else edge['st'], edge['predicate'], row['type'] if edge['object_id'] == ident else edge['ot'])
             elif after is not None and _revision(self._row(table, ident)) != _revision(after['row']):

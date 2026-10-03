@@ -16,6 +16,7 @@ from ontokb.reading import _mentioned, article_categories, reading_library, inge
     ('日常随笔', {}, ['未分类']),
     ('邮件 Mail', {}, ['未分类']),
     ('AI', {'categories': [' 历史类 ', '历史类', None]}, ['历史类']),
+    ('Notes', {'categories': ['历史', '历史类', '科技']}, ['历史类', '科技']),
 ])
 def test_article_categories(title, meta, expected):
     assert article_categories(title, meta) == expected
@@ -27,8 +28,9 @@ def test_manual_category_persists_and_preserves_other_content(tmp_path):
     meta = {'summary': '人工智能的发展。', 'raw_text': '正文', 'topics': ['AI']}
     for cid in ['a', 'b']:
         g.upsert_content(cid, 'article', 'other', '', 'AI', status='processed', meta=meta)
-    for category in ['历史', '科技', '时政']:
-        assert set_article_category(g, {'content_id': 'a', 'category': category})['categories'] == [category]
+    for category in ['历史', 'AI类', '经济类', '实证类', '未分类', '科技', '时政']:
+        g.upsert_content('a', 'article', 'other', '', 'AI', status='processed', meta={**meta, 'categories': ['未分类']})
+        assert set_article_category(g, {'content_id': 'a', 'category': category})['categories'] == ['历史类' if category == '历史' else category]
     g.close()
     g = GraphStore(path)
     docs = {d['id']: d for d in reading_library(g)}
@@ -100,9 +102,9 @@ def test_reading_http_endpoints_and_large_unicode_article(tmp_path, monkeypatch)
                           data=json.dumps({'content_id': 'a', 'category': '历史'}).encode(),
                           headers={'Content-Type': 'application/json', 'Origin': origin})
         with urlopen(request) as response:
-            assert json.load(response)['categories'] == ['历史']
+            assert json.load(response)['categories'] == ['历史类']
         with urlopen(origin+'/api/reading') as response:
-            assert json.load(response)['library'][0]['categories'] == ['历史']
+            assert json.load(response)['library'][0]['categories'] == ['历史类']
         body = {'title': 'Long article', 'text': '正文内容。'*5000}
         request = Request(origin+'/api/articles', data=json.dumps(body, ensure_ascii=False).encode(),
                           headers={'Content-Type': 'application/json', 'Origin': origin})
@@ -167,4 +169,54 @@ def test_article_ingest_end_to_end_and_dedup(tmp_path, monkeypatch):
     assert len(calls) == 1
     with pytest.raises(ValueError, match='标题'):
         ingest_article(g, {**body,'text':body['text']+'修改版本'})
+    g.close()
+
+
+def test_category_toggle_removes_only_selected_category_and_persists(tmp_path):
+    path = tmp_path / 'toggle.db'
+    g = GraphStore(path)
+    meta = {'summary': 'AI investment', 'raw_text': 'Keep text', 'categories': ['历史', '历史类', 'AI类']}
+    g.upsert_content('a', 'article', 'other', '', 'History AI', 'processed', meta)
+    result = set_article_category(g, {'content_id': 'a', 'category': '历史类'})
+    assert result['removed'] is True
+    assert result['categories'] == ['AI类']
+    result = set_article_category(g, {'content_id': 'a', 'category': 'AI类'})
+    assert result['categories'] == ['未分类']
+    g.close()
+    g = GraphStore(path)
+    assert reading_library(g)[0]['categories'] == ['未分类']
+    saved = json.loads(g.conn.execute("SELECT meta FROM contents WHERE id='a'").fetchone()[0])
+    assert saved['raw_text'] == meta['raw_text']
+    assert saved['summary'] == meta['summary']
+    assert set_article_category(g, {'content_id': 'a', 'category': 'AI类'})['removed'] is False
+    assert reading_library(g)[0]['categories'] == ['AI类']
+    g.close()
+
+
+def test_toggle_off_inferred_category_does_not_reappear():
+    g = GraphStore()
+    g.upsert_content('a', 'article', 'other', '', 'AI', 'processed', {})
+    assert set_article_category(g, {'content_id': 'a', 'category': 'AI类'})['categories'] == ['未分类']
+    assert reading_library(g)[0]['categories'] == ['未分类']
+    g.close()
+
+
+def test_article_categories_support_multiple_selections(tmp_path):
+    path = tmp_path / 'multi-categories.db'
+    g = GraphStore(path)
+    g.upsert_content('a', 'article', 'other', '', 'Notes', 'processed', {'categories': ['未分类']})
+    for category, expected in [
+        ('历史', ['历史类']),
+        ('科技', ['历史类', '科技']),
+        ('AI类', ['历史类', '科技', 'AI类']),
+        ('科技', ['历史类', 'AI类']),
+        ('历史类', ['AI类']),
+        ('AI类', ['未分类']),
+        ('经济类', ['经济类']),
+    ]:
+        assert set_article_category(g, {'content_id': 'a', 'category': category})['categories'] == expected
+        assert reading_library(g)[0]['categories'] == expected
+    g.close()
+    g = GraphStore(path)
+    assert reading_library(g)[0]['categories'] == ['经济类']
     g.close()

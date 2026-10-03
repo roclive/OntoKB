@@ -12,10 +12,96 @@
   const graphStage=document.querySelector('.graph-stage'),inline=document.createElement('section');
   inline.id='media-inline';inline.className='media-inline';inline.hidden=true;inline.setAttribute('aria-label','多媒体与摘要同步阅读');inline.append(surface);graphStage.append(inline);
   const el=id=>document.getElementById('media-'+id),audio=el('audio'),compilation=el('compilation');
+  const headerActions=document.createElement('div');headerActions.className='media-header-actions';
+  headerActions.append(surface.querySelector('.media-mode-bar'),el('close'));
+  surface.querySelector('.media-head').append(headerActions);
+  let sourceVideoUrl='';
+  const sourceLinks=document.createElement('span');sourceLinks.className='media-source-links';el('source').before(sourceLinks);sourceLinks.append(el('source'));
+  for(const [id,parent] of [['local-source',sourceLinks],['video-local-source',surface.querySelector('.media-video-footer')]]){
+    const link=document.createElement('a');link.id='media-'+id;link.textContent='本地原视频 ↗';link.target='_blank';link.rel='noopener noreferrer';link.hidden=true;link.className='media-local-source';parent.append(link);
+  }
+  function updateLocalSource(url,start=0){
+    if(url!==undefined)sourceVideoUrl=url||'';
+    for(const id of ['local-source','video-local-source']){const link=el(id);link.hidden=!sourceVideoUrl;link.removeAttribute('href');if(sourceVideoUrl)link.href=asset(sourceVideoUrl)+(id==='local-source'?'#t='+Math.max(0,Number(start)||0):'');}
+  }
+  const subtitle=el('text'),subtitleStyleKey='ontokb.media.subtitleStyle';
+  const subtitleDefaults={size:22,font:'sans',color:'#283324',bold:false,lineHeight:1.7};
+  const subtitleFonts={sans:'"Segoe UI","Microsoft YaHei",sans-serif',serif:'SimSun,"Songti SC",serif',mono:'Consolas,"Microsoft YaHei",monospace'};
+  let subtitleStyle={...subtitleDefaults};
+  try{const saved=JSON.parse(localStorage.getItem(subtitleStyleKey)||'null');if(saved){
+    if(Number.isFinite(saved.size)&&saved.size>=14&&saved.size<=40)subtitleStyle.size=saved.size;
+    if(Object.hasOwn(subtitleFonts,saved.font))subtitleStyle.font=saved.font;
+    if(/^#[0-9a-f]{6}$/i.test(saved.color))subtitleStyle.color=saved.color;
+    subtitleStyle.bold=saved.bold===true;
+    if([1.4,1.7,2].includes(saved.lineHeight))subtitleStyle.lineHeight=saved.lineHeight;
+  }}catch(_){}
+  function applySubtitleStyle(){subtitle.style.fontSize=subtitleStyle.size+'px';subtitle.style.fontFamily=subtitleFonts[subtitleStyle.font];subtitle.style.color=subtitleStyle.color;subtitle.style.fontWeight=subtitleStyle.bold?'600':'400';subtitle.style.lineHeight=String(subtitleStyle.lineHeight);}
+  applySubtitleStyle();
+  const volumeKey='ontokb.media.audioVolume',volumeControls=document.createElement('div');volumeControls.className='media-volume-controls';
+  volumeControls.innerHTML='<button id="media-mute" type="button" aria-label="静音原声" aria-pressed="false">静音</button><label for="media-volume">音量</label><input id="media-volume" type="range" min="0" max="100" step="1" value="100" aria-label="原声音量"><output id="media-volume-value" for="media-volume">100%</output>';
+  subtitle.after(volumeControls);
+  try{const saved=JSON.parse(localStorage.getItem(volumeKey)||'null');if(saved&&Number.isFinite(saved.volume)&&saved.volume>=0&&saved.volume<=1){audio.volume=saved.volume;audio.muted=saved.muted===true;}}catch(_){}
+  function syncVolume(){const muted=audio.muted||audio.volume===0;el('volume').value=String(Math.round(audio.volume*100));el('volume-value').textContent=muted?'0%':Math.round(audio.volume*100)+'%';el('mute').textContent=muted?'取消静音':'静音';el('mute').setAttribute('aria-label',muted?'取消原声静音':'静音原声');el('mute').setAttribute('aria-pressed',String(muted));}
+  function saveVolume(){syncVolume();try{localStorage.setItem(volumeKey,JSON.stringify({volume:audio.volume,muted:audio.muted}));}catch(_){}}
+  el('volume').addEventListener('input',()=>{audio.volume=Number(el('volume').value)/100;audio.muted=false;saveVolume();});
+  el('mute').onclick=()=>{if(audio.muted||audio.volume===0){if(audio.volume===0)audio.volume=.5;audio.muted=false;}else audio.muted=true;saveVolume();};
+  audio.addEventListener('volumechange',saveVolume);syncVolume();
+  const subtitleMenu=document.createElement('div');subtitleMenu.id='media-subtitle-settings';subtitleMenu.className='media-subtitle-settings';subtitleMenu.hidden=true;subtitleMenu.setAttribute('role','dialog');subtitleMenu.setAttribute('aria-label','字幕显示设置');
+  subtitleMenu.innerHTML='<strong>字幕显示设置</strong><label>字号 <output id="media-subtitle-size-value"></output><input id="media-subtitle-size" type="range" min="14" max="40" step="1"></label><label>字体<select id="media-subtitle-font"><option value="sans">黑体／无衬线</option><option value="serif">宋体／衬线</option><option value="mono">等宽字体</option></select></label><label>文字颜色<input id="media-subtitle-color" type="color"></label><label>行距<select id="media-subtitle-lineHeight"><option value="1.4">紧凑</option><option value="1.7">标准</option><option value="2">宽松</option></select></label><label class="media-subtitle-bold"><input id="media-subtitle-bold" type="checkbox">加粗字幕</label><div class="media-subtitle-actions"><button id="media-subtitle-reset" type="button">恢复默认</button><button id="media-subtitle-done" type="button">完成</button></div>';
+  document.body.append(subtitleMenu);
+  function syncSubtitleSettings(){for(const key of ['size','font','color','lineHeight'])el('subtitle-'+key).value=String(subtitleStyle[key]);el('subtitle-bold').checked=subtitleStyle.bold;el('subtitle-size-value').textContent=subtitleStyle.size+' px';}
+  function closeSubtitleSettings(restore=false){subtitleMenu.hidden=true;subtitle.setAttribute('aria-expanded','false');if(restore)subtitle.focus();}
+  function openSubtitleSettings(event){event.preventDefault();event.stopPropagation();syncSubtitleSettings();subtitleMenu.hidden=false;subtitle.setAttribute('aria-expanded','true');const rect=subtitle.getBoundingClientRect(),bounds=subtitleMenu.getBoundingClientRect();const keyboard=event.type==='keydown';subtitleMenu.style.left=Math.max(8,Math.min(keyboard?rect.left:event.clientX,innerWidth-bounds.width-8))+'px';subtitleMenu.style.top=Math.max(8,Math.min(keyboard?rect.top:event.clientY,innerHeight-bounds.height-8))+'px';el('subtitle-size').focus();}
+  subtitle.tabIndex=0;subtitle.title='右键调整字幕字号、字体和颜色';subtitle.setAttribute('aria-haspopup','dialog');subtitle.setAttribute('aria-expanded','false');subtitle.addEventListener('contextmenu',openSubtitleSettings);
+  subtitle.addEventListener('keydown',event=>{if(event.key==='ContextMenu'||(event.shiftKey&&event.key==='F10'))openSubtitleSettings(event);});
+  subtitleMenu.addEventListener('input',()=>{subtitleStyle={size:Number(el('subtitle-size').value),font:el('subtitle-font').value,color:el('subtitle-color').value,bold:el('subtitle-bold').checked,lineHeight:Number(el('subtitle-lineHeight').value)};applySubtitleStyle();el('subtitle-size-value').textContent=subtitleStyle.size+' px';try{localStorage.setItem(subtitleStyleKey,JSON.stringify(subtitleStyle));}catch(_){}});
+  el('subtitle-reset').onclick=()=>{subtitleStyle={...subtitleDefaults};applySubtitleStyle();syncSubtitleSettings();try{localStorage.removeItem(subtitleStyleKey);}catch(_){}};
+  el('subtitle-done').onclick=()=>closeSubtitleSettings(true);
+  document.addEventListener('pointerdown',event=>{if(!subtitleMenu.hidden&&!subtitleMenu.contains(event.target))closeSubtitleSettings();});
+  document.addEventListener('keydown',event=>{if(!subtitleMenu.hidden&&event.key==='Escape'){event.preventDefault();closeSubtitleSettings(true);}});
+  window.addEventListener('resize',()=>closeSubtitleSettings());
   const heightDivider=document.createElement('div');heightDivider.id='media-height-divider';heightDivider.tabIndex=0;
   heightDivider.setAttribute('role','separator');heightDivider.setAttribute('aria-orientation','horizontal');heightDivider.setAttribute('aria-label','调整截图与字幕区域高度');heightDivider.setAttribute('aria-controls','media-layout');el('layout').after(heightDivider);
   const heightStorageKey='ontokb.media.layoutHeight';let preferredHeight=null,heightDrag=null;
   try{const saved=Number(localStorage.getItem(heightStorageKey));if(Number.isFinite(saved)&&saved>=160)preferredHeight=saved;}catch(_){}
+  function resizeBlock(target,label,key,axis='height',parent=target){
+    const divider=document.createElement('div');divider.className='media-block-divider '+(axis==='width'?'vertical':'horizontal');divider.tabIndex=0;
+    divider.setAttribute('role','separator');divider.setAttribute('aria-orientation',axis==='width'?'vertical':'horizontal');divider.setAttribute('aria-label',label);divider.title=label+' · 双击恢复默认';
+    target.after(divider);let drag=null;
+    function apply(value,save=false){
+      if(!target.getBoundingClientRect().width)return;
+      const available=axis==='width'?parent.clientWidth:surface.clientHeight;
+      const videoFrame=target.classList.contains('media-compilation-frame');
+      const min=axis==='width'||videoFrame?120:target.classList.contains('media-footer')?68:32;
+      const max=videoFrame?Math.max(min,parent.clientHeight-(parent.querySelector('.media-footer')?.getBoundingClientRect().height||100)-10):Math.max(min,available*(axis==='width'?.85:.45));
+      const size=Math.round(Math.max(min,Math.min(max,value)));
+      if(axis==='width')parent.style.gridTemplateColumns=`${size}px 8px minmax(0,1fr)`;
+      else{target.style.height=size+'px';target.style.flex='0 0 '+size+'px';}
+      divider.setAttribute('aria-valuemin',min);divider.setAttribute('aria-valuemax',Math.round(max));divider.setAttribute('aria-valuenow',size);
+      if(save)try{localStorage.setItem(key,String(size));}catch(_){}
+    }
+    try{const saved=Number(localStorage.getItem(key));if(saved>0){const observer=new ResizeObserver(()=>{if(target.getBoundingClientRect().width>0){apply(saved);observer.disconnect();}});observer.observe(target);}}catch(_){}
+    divider.onpointerdown=event=>{if(event.button!==0)return;event.preventDefault();divider.focus();drag={point:axis==='width'?event.clientX:event.clientY,size:target.getBoundingClientRect()[axis]};divider.setPointerCapture(event.pointerId);};
+    divider.onpointermove=event=>{if(drag)apply(drag.size+(axis==='width'?event.clientX:event.clientY)-drag.point,true);};
+    const finish=event=>{drag=null;if(divider.hasPointerCapture(event.pointerId))divider.releasePointerCapture(event.pointerId);};divider.onpointerup=finish;divider.onpointercancel=finish;divider.onlostpointercapture=()=>drag=null;
+    divider.onkeydown=event=>{const keys=axis==='width'?['ArrowLeft','ArrowRight']:['ArrowUp','ArrowDown'];if(!keys.includes(event.key))return;event.preventDefault();apply(target.getBoundingClientRect()[axis]+(event.key===keys[0]?-10:10),true);};
+    divider.ondblclick=()=>{target.style.height='';target.style.flex='';if(axis==='width')parent.style.gridTemplateColumns='';try{localStorage.removeItem(key);}catch(_){}};
+    window.addEventListener('resize',()=>{if(axis==='width'&&parent.style.gridTemplateColumns)apply(target.getBoundingClientRect().width);else if(target.style.height)apply(parseFloat(target.style.height));});
+  }
+  resizeBlock(surface.querySelector('.media-head'),'调整标题区高度','ontokb.media.headerHeight');
+  resizeBlock(el('layout').querySelector('.media-frame'),'调整截图与字幕宽度','ontokb.media.frameWidth','width',el('layout'));
+  resizeBlock(el('player').querySelector('.media-footer'),'调整播放控制区高度','ontokb.media.footerHeight');
+  resizeBlock(el('video-player').querySelector('.media-compilation-frame'),'调整精剪视频高度','ontokb.media.videoHeight','height',el('video-player'));
+  const takeaways=document.createElement('section');takeaways.id='media-takeaways';takeaways.className='media-takeaways';takeaways.setAttribute('aria-labelledby','media-takeaways-heading');
+  takeaways.innerHTML='<div class="media-takeaways-head"><h3 id="media-takeaways-heading">值得记住</h3><span id="media-takeaways-count"></span></div><div id="media-takeaways-list" class="media-takeaways-list"></div>';
+  el('player').append(takeaways);
+  function renderTakeaways(){
+    const points=(currentDoc?.key_points||[]).filter(text=>typeof text==='string'&&text.trim());
+    const list=el('takeaways-list');list.replaceChildren();el('takeaways-count').textContent=points.length+' 条 · 当前文章';
+    for(const text of points){const item=document.createElement('div');item.className='key-point';item.textContent=text;list.append(item);}
+    if(!points.length){const empty=document.createElement('p');empty.className='media-takeaways-empty';empty.textContent='这篇文章暂无“值得记住”条目。';list.append(empty);}
+    list.scrollTop=0;
+  }
   const summaryLabel=document.createElement('div');summaryLabel.id='media-current-summary';summaryLabel.className='media-current-summary';el('title').after(summaryLabel);
   const coverage=document.createElement('p');coverage.id='media-coverage';coverage.className='media-coverage';el('notice').before(coverage);
   const videoSummaryLabel=document.createElement('div');videoSummaryLabel.id='media-video-current-summary';videoSummaryLabel.className='media-current-summary';el('video-notice').before(videoSummaryLabel);
@@ -98,6 +184,7 @@
     el('title').textContent=slide.title||'原声片段 '+(index+1);
     el('image').hidden=!slide.image_url;el('image').removeAttribute('src');if(slide.image_url)el('image').src=asset(slide.image_url);
     el('source').hidden=true;try{const source=new URL(doc.url);if(['http:','https:'].includes(source.protocol)){source.searchParams.set('t',Math.floor(Number(slide.start)||0)+'s');el('source').href=source.href;el('source').textContent='原视频 '+clock(slide.start)+'–'+clock(slide.end)+' ↗';el('source').hidden=false;}}catch(_){}
+    updateLocalSource(undefined,slide.start);
     el('prev').disabled=index===0;el('next').disabled=index===slides.length-1;el('play').textContent='▶ 播放原声';el('notice').textContent='画面将停留到这一段原声结束，再切换到下一张。';
     [...el('dots').children].forEach((dot,i)=>dot.setAttribute('aria-current',String(i===index)));
     audio.src=asset(slide.audio_url);audio.load();
@@ -162,10 +249,15 @@
   async function prepare(){
     cleanup();el('method').textContent='';el('method').hidden=true;slides=[];videoSlides=[];summaryMap=[];
     const token=generation,requestedMode=mode;doc=currentDoc?{...currentDoc}:null;
+    updateLocalSource('');
+    renderTakeaways();
     const target=entranceTarget?.id===doc?.id?{...entranceTarget,generation:token}:null;
     el('mode-video').setAttribute('aria-pressed',String(mode==='video'));el('mode-audio').setAttribute('aria-pressed',String(mode==='audio'));
     if(!doc){message('请先选择一篇视频资料。');return;}
-    el('heading').textContent=doc.title||'多媒体摘要';
+    el('heading').replaceChildren();
+    if(/^https?:\/\//i.test(doc.url||'')){
+      const titleLink=document.createElement('a');titleLink.href=doc.url;titleLink.target='_blank';titleLink.rel='noopener noreferrer';titleLink.textContent=doc.title||'多媒体摘要';titleLink.title='在新标签页打开原文：'+(doc.title||doc.url);el('heading').append(titleLink);
+    }else el('heading').textContent=doc.title||'多媒体摘要';
     if(doc.kind!=='video'){message('这篇资料没有可用的视频原声。视频精剪与原声漫游适用于视频资料，你仍可关闭此窗口继续摘要与知识图谱漫游。');return;}
     message(mode==='video'?'Codex 正在根据摘要组织约 1–2 分钟的视频剪辑…\n原视频画面和声音将拼接成一段可下载的完整短片。':'Codex 正在根据摘要组织原声漫游与中文字幕…\n保留约原视频三分之一时长，原声、画面和左侧摘要同步展示。');
     controller=new AbortController();const sessionController=controller,started=Date.now();
@@ -176,6 +268,7 @@
         const response=await fetch(apiUrl(first?'/api/media/prepare':'/api/media/status',first?{}:{content_id:doc.id,mode:requestedMode}),{method:first?'POST':'GET',headers:first?{'Content-Type':'application/json'}:undefined,body:first?JSON.stringify({content_id:doc.id,mode:requestedMode}):undefined,signal:requestController.signal});
         const result=await response.json();if(token!==generation||!isOpen())return;
         if(!response.ok)throw new Error(result.error||result.message||'媒体服务暂时不可用。');
+        updateLocalSource(result.source_video_url);
         if(result.status==='ready'){ready(result,target);return;}
         if(result.status==='error'||result.status==='unavailable'){message(result.message||'暂时无法准备这种多媒体摘要。',true);return;}
         if(Date.now()-started>300000){message('准备仍在后台进行。稍后点击「重新准备」查看结果。',true);return;}
@@ -186,6 +279,7 @@
     request(true);
   }
   function close(navigate=true){
+    closeSubtitleSettings();
     const target=returnPoint;
     cleanup();inline.hidden=true;graphStage.classList.remove('media-inline-active');document.body.classList.remove('media-reading-active');
     restoreSummary();
@@ -267,6 +361,7 @@
   el('image').onerror=()=>{el('image').hidden=true;};
   new MutationObserver(()=>{
     updateGraphEntry();
+    renderTakeaways();
     if(doc&&currentDoc?.id!==doc.id){if(isOpen())close(false);returnPoint=null;entranceTarget=null;}
   }).observe(document.getElementById('document-title'),{childList:true,subtree:true,characterData:true});
 })();
