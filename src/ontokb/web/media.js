@@ -8,7 +8,7 @@
     <div class="media-mode-bar" role="group" aria-label="摘要展示方式"><button id="media-mode-video" aria-pressed="true"><strong>视频精剪</strong><small>约 1–2 分钟 · 完整视频</small></button><button id="media-mode-audio" aria-pressed="false"><strong>原声漫游</strong><small>约原视频 1/3 · 截图配原声</small></button></div>
     <section id="media-status" class="media-status" role="status"><span class="media-status-icon" aria-hidden="true">◌</span><p id="media-message"></p><button id="media-retry" hidden>重新准备</button></section>
     <section id="media-video-player" hidden><div class="media-compilation-frame"><video id="media-compilation" controls playsinline preload="metadata" aria-label="完整视频精剪"></video></div><footer class="media-footer"><div class="media-video-footer"><div><strong>原视频画面与声音，连成一段短片</strong><p id="media-video-duration" class="media-method"></p></div><a id="media-video-download" class="media-download" download>↓ 下载完整 MP4</a></div><p id="media-video-notice" class="media-notice" aria-live="polite">点击视频播放键，观看完整精剪。</p></footer></section>
-    <section id="media-player" hidden><div id="media-layout" class="media-layout"><div class="media-frame"><img id="media-image" alt="当前原声片段的视频截图"><span class="media-image-missing">此片段截图暂不可用，仍可收听原声。</span><audio id="media-audio" preload="metadata"></audio></div><div class="media-caption"><span id="media-counter" class="media-counter"></span><h3 id="media-title"></h3><span class="media-text-label">中文字幕 · 原视频声音</span><p id="media-text"></p><a id="media-source" target="_blank" rel="noopener noreferrer">回到原视频 ↗</a></div></div><footer class="media-footer"><input id="media-progress" class="media-timeline" type="range" min="0" max="100" step="0.1" value="0" aria-label="拖动定位原声漫游进度"><div class="media-controls"><button id="media-prev" aria-label="上一张">←</button><button id="media-play" class="primary">▶ 播放原声</button><button id="media-next" aria-label="下一张">→</button><div id="media-dots" class="media-dots"></div><span id="media-time" class="media-time"></span></div><div class="media-audio-download-row"><span id="media-audio-duration" class="media-method"></span><a id="media-audio-download" class="media-download" download>↓ 下载完整音频</a></div><p id="media-notice" class="media-notice" aria-live="polite"></p></footer></section>`;
+    <section id="media-player" hidden><div id="media-layout" class="media-layout"><div class="media-frame"><img id="media-image" alt="当前原声片段的视频截图"><span class="media-image-missing">此片段截图暂不可用，仍可收听原声。</span><audio id="media-audio" preload="metadata"></audio></div><div class="media-caption"><span id="media-counter" class="media-counter"></span><h3 id="media-title"></h3><span class="media-text-label">字幕 · 原视频声音</span><p id="media-text"></p><a id="media-source" target="_blank" rel="noopener noreferrer">回到原视频 ↗</a></div></div><footer class="media-footer"><input id="media-progress" class="media-timeline" type="range" min="0" max="100" step="0.1" value="0" aria-label="拖动定位原声漫游进度"><div class="media-controls"><button id="media-prev" aria-label="上一张">←</button><button id="media-play" class="primary">▶ 播放原声</button><button id="media-next" aria-label="下一张">→</button><div id="media-dots" class="media-dots"></div><span id="media-time" class="media-time"></span></div><div class="media-audio-download-row"><span id="media-audio-duration" class="media-method"></span><a id="media-audio-download" class="media-download" download>↓ 下载完整音频</a></div><p id="media-notice" class="media-notice" aria-live="polite"></p></footer></section>`;
   const graphStage=document.querySelector('.graph-stage'),inline=document.createElement('section');
   inline.id='media-inline';inline.className='media-inline';inline.hidden=true;inline.setAttribute('aria-label','多媒体与摘要同步阅读');inline.append(surface);graphStage.append(inline);
   const el=id=>document.getElementById('media-'+id),audio=el('audio'),compilation=el('compilation');
@@ -175,7 +175,7 @@
   async function play(){
     if(pendingSeek){pendingSeek.autoplay=true;el('play').textContent='Ⅱ 暂停';return;}
     const token=clipGeneration;
-    try{await audio.play();if(token!==clipGeneration||!isOpen())return;el('notice').textContent='原声、中文字幕和左侧摘要同步播放。点击摘要可跳到已收录的原声。';}
+    try{await audio.play();if(token!==clipGeneration||!isOpen())return;el('notice').textContent='原声、字幕和左侧摘要同步播放。点击摘要可跳到已收录的原声。';}
     catch(error){if(token!==clipGeneration||!isOpen())return;el('notice').textContent='点击「播放原声」开始收听；浏览器可能需要你手动启动声音。';}
   }
   function showSlide(next,autoplay=false,offset=0){
@@ -259,7 +259,7 @@
       const titleLink=document.createElement('a');titleLink.href=doc.url;titleLink.target='_blank';titleLink.rel='noopener noreferrer';titleLink.textContent=doc.title||'多媒体摘要';titleLink.title='在新标签页打开原文：'+(doc.title||doc.url);el('heading').append(titleLink);
     }else el('heading').textContent=doc.title||'多媒体摘要';
     if(doc.kind!=='video'){message('这篇资料没有可用的视频原声。视频精剪与原声漫游适用于视频资料，你仍可关闭此窗口继续摘要与知识图谱漫游。');return;}
-    message(mode==='video'?'Codex 正在根据摘要组织约 1–2 分钟的视频剪辑…\n原视频画面和声音将拼接成一段可下载的完整短片。':'Codex 正在根据摘要组织原声漫游与中文字幕…\n保留约原视频三分之一时长，原声、画面和左侧摘要同步展示。');
+    message(mode==='video'?'Codex 正在根据摘要组织约 1–2 分钟的视频剪辑…\n原视频画面和声音将拼接成一段可下载的完整短片。':'Codex 正在根据摘要组织原声漫游与字幕…\n保留约原视频三分之一时长，原声、画面和左侧摘要同步展示。');
     controller=new AbortController();const sessionController=controller,started=Date.now();
     async function request(first){
       if(token!==generation||!isOpen())return;

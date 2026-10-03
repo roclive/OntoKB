@@ -9,7 +9,7 @@ function harness(fetchImpl, {kind = 'video', fakeTimers = false,storedHeight=nul
   const storage=new Map(storedHeight===null?[]:[['ontokb.media.layoutHeight',String(storedHeight)]]);
   class Element {
     constructor() {
-      this.children = []; this.listeners = {}; this.attrs = {}; this.hidden = false; this.paused = true; this.currentTime = 0;this.open=false;this.offsetTop=0;
+      this.children = []; this.listeners = {}; this.attrs = {}; this.hidden = false; this.paused = true; this.currentTime = 0;this.open=false;this.offsetTop=0;this.volume=1;this.muted=false;
       const classes=new Set();this.classList={add:(...names)=>names.forEach(n=>classes.add(n)),remove:(...names)=>names.forEach(n=>classes.delete(n)),contains:n=>classes.has(n),toggle:(n,on)=>{if(on===undefined)on=!classes.has(n);if(on)classes.add(n);else classes.delete(n);return on;}};
       const styles=new Map();this.style={setProperty:(key,value)=>styles.set(key,value),removeProperty:key=>styles.delete(key),getPropertyValue:key=>styles.get(key)||''};
     }
@@ -30,6 +30,7 @@ function harness(fetchImpl, {kind = 'video', fakeTimers = false,storedHeight=nul
     getBoundingClientRect(){return this.rect||{height:this.id==='media-player'?400:260,width:900,left:0,top:0};}
     scrollTo(value) {this.lastScroll=value;this.scrollCount=(this.scrollCount||0)+1;}
     closest(selector) {return selector.includes('.summary-step')&&this.classList.contains('summary-step')?this:null;}
+    querySelector(selector) {this.selected ||= new Map();if(!this.selected.has(selector))this.selected.set(selector,new Element());return this.selected.get(selector);}
     replaceChildren() { this.children = []; }
     addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
     fire(name,event={}) { for (const callback of this.listeners[name] || []) callback(event); }
@@ -42,7 +43,8 @@ function harness(fetchImpl, {kind = 'video', fakeTimers = false,storedHeight=nul
   function get(id) { if (!nodes.has(id)) { const el = new Element(); el.id = id; } return nodes.get(id); }
   let observer;
   const context = {
-    document: { createElement: tag => {createdTags.push(tag);return new Element();}, getElementById: get, querySelector: () => new Element(), body: new Element() },
+    document: { createElement: tag => {createdTags.push(tag);return new Element();}, getElementById: get, querySelector: () => new Element(), body: new Element(), addEventListener() {} },
+    window: {addEventListener() {}},
     currentDoc: { id: 'video-1', kind, title: 'An example', summary: 'A concise overview',steps:[{text:'第一段摘要'},{text:'第二段摘要'},{text:'未收录的第三段'}], url: 'https://youtube.com/watch?v=example' },
     stepIndex:0,
     selectStep(index){context.stepIndex=index;selections.push({id:context.currentDoc?.id,index});get('summary-steps').children.forEach((button,i)=>{button.classList.toggle('active',i===index);button.setAttribute('aria-current',i===index?'step':'false');});},
@@ -121,6 +123,21 @@ test('audio tour holds screenshots for longer original audio and advances only w
   assert.equal(h.get('title').textContent,'<script>hello</script>');
   h.get('close').onclick();assert.equal(h.get('audio').src,undefined);
 });
+
+for (const caption of ['Original English captions.', 'English 与中文混合字幕']) {
+  test('audio tour plays without rejecting caption language: ' + caption, async () => {
+    const data = JSON.parse(JSON.stringify(audioReady));
+    data.subtitle_language = 'mixed';
+    data.slides[0].captions[0].text = caption;
+    const h = harness(async () => response(data));
+    h.get('audio-open').onclick();await flush();
+    assert.equal(h.get('text').textContent, caption);
+    assert.equal(h.get('player').hidden, false);
+    h.get('play').onclick();await flush();
+    assert.equal(h.get('audio').paused, false);
+    h.get('close').onclick();
+  });
+}
 
 test('switching formats stops both players and loads the separate format cache', async () => {
   const modes=[];

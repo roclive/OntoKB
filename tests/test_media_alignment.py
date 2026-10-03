@@ -49,7 +49,7 @@ def test_chinese_original_preserved_and_null_never_invents_mapping():
     assert result['subtitle_source'] == 'source'
 
 
-@pytest.mark.parametrize('mutation', ['unknown', 'duplicate', 'missing', 'timestamp', 'boolean_index', 'outside_index', 'english'])
+@pytest.mark.parametrize('mutation', ['unknown', 'duplicate', 'missing', 'timestamp', 'boolean_index', 'outside_index', 'empty', 'non_string'])
 def test_invalid_model_output_rejected(mutation):
     batch = [{'id': 's0c1', 'text': 'The evidence supports a conclusion.', 'already_chinese': False}]
     item = {'id': 's0c1', 'text': '证据支持这一结论。', 'summary_index': 0}
@@ -66,8 +66,10 @@ def test_invalid_model_output_rejected(mutation):
         item['summary_index'] = True
     elif mutation == 'outside_index':
         item['summary_index'] = 10
+    elif mutation == 'empty':
+        item['text'] = ' '
     else:
-        item['text'] = batch[0]['text']
+        item['text'] = None
     with pytest.raises(alignment.AlignmentError):
         alignment.validate_batch(data, batch, ['摘要'])
 
@@ -90,6 +92,12 @@ def test_batch_request_uses_utf8_and_bounds_output_size(monkeypatch):
     assert calls[0][0][1:3] == ['-X', 'utf8']
     assert calls[0][1]['encoding'] == 'utf-8'
     assert calls[0][1]['timeout'] == 200
+    payload = json.loads(calls[0][1]['input'])
+    schema = payload['schema']['properties']['captions']
+    assert schema['minItems'] == schema['maxItems'] == 1
+    assert schema['items']['properties']['id']['enum'] == ['x']
+    assert schema['items']['properties']['summary_index']['enum'] == [None, 0]
+    assert 'schema=d["schema"]' in calls[0][0][-1]
     cues = [{'text': 'x' * 200} for _ in range(40)]
     batches = list(alignment._batches(cues))
     assert sum(map(len, batches)) == 40
@@ -182,7 +190,7 @@ def test_retry_resumes_only_failed_batches_and_summary_invalidates_cache(tmp_pat
         alignment.enrich(data, segments, {'summary': '现有摘要。'}, {},
                          requester=fail_second, cache_dir=tmp_path)
     assert calls == ['s0c0', 's0c12', 's0c12']
-    assert len(list((tmp_path / 'caption-checkpoints').glob('*.json'))) == 1
+    assert len(list((tmp_path / 'caption-checkpoints').glob('*.json'))) == 13
     calls.clear()
     def succeed(batch, steps, options, context):
         calls.append(batch[0]['id'])
@@ -220,6 +228,79 @@ def test_real_proper_name_dense_chinese_caption_is_accepted():
     assert result['s4c180']['text'] == caption
     for unchanged in ('Gockbot, MAAI, and the Que from MANUS',
                       'Gockbot and MAAI are the models from MANUS 中文'):
-        with pytest.raises(alignment.AlignmentError):
-            alignment.validate_batch({'captions': [
-                {'id': 's4c180', 'text': unchanged, 'summary_index': None}]}, batch, [])
+        result = alignment.validate_batch({'captions': [
+            {'id': 's4c180', 'text': unchanged, 'summary_index': None}]}, batch, [])
+        assert result['s4c180']['text'] == unchanged
+
+
+def test_partial_response_retries_only_invalid_or_missing_cues(tmp_path):
+    segments = [{'start': 10+i, 'end': 11+i, 'text': f'Original statement {i}'} for i in range(3)]
+    calls = []
+    def partial(batch, *args):
+        calls.append([c['id'] for c in batch])
+        data = response(batch, *args)
+        if len(calls) == 1:
+            data['captions'][1]['text'] = ''
+            data['captions'].pop()
+        return data
+    result = alignment.enrich(manifest(), segments, {}, {}, requester=partial, cache_dir=tmp_path)
+    assert alignment.aligned(result)
+    assert calls == [['s0c0', 's0c1', 's0c2'], ['s0c1', 's0c2']]
+
+
+def test_repeated_batch_failure_splits_and_preserves_timestamps():
+    segments = [{'start': 10+i, 'end': 11+i, 'text': f'Original statement {i}'} for i in range(4)]
+    calls = []
+    def only_small(batch, *args):
+        calls.append(len(batch))
+        if len(batch) > 1:
+            return {'captions': []}
+        return response(batch, *args)
+    result = alignment.enrich(manifest(), segments, {}, {}, requester=only_small)
+    assert calls == [4, 4, 2, 2, 1, 1, 2, 2, 1, 1]
+    assert alignment.aligned(result)
+    assert [(c['start'], c['end']) for c in result['slides'][0]['captions']] == [(i, i+1) for i in range(4)]
+
+
+def test_partial_checkpoint_survives_persistent_single_cue_failure(tmp_path):
+    segments = [{'start': 10+i, 'end': 11+i, 'text': f'Original statement {i}'} for i in range(2)]
+    calls = []
+    def bad_one(batch, *args):
+        calls.append([c['id'] for c in batch])
+        data = response(batch, *args)
+        for item in data['captions']:
+            if item['id'] == 's0c1':
+                item['text'] = ''
+        return data
+    with pytest.raises(alignment.AlignmentError, match='s0c1'):
+        alignment.enrich(manifest(), segments, {}, {}, requester=bad_one, cache_dir=tmp_path)
+    assert calls == [['s0c0', 's0c1'], ['s0c1']]
+    calls.clear()
+    def recover(batch, *args):
+        calls.append([c['id'] for c in batch])
+        return response(batch, *args)
+    result = alignment.enrich(manifest(), segments, {}, {}, requester=recover, cache_dir=tmp_path)
+    assert calls == [['s0c1']]
+    assert alignment.aligned(result)
+
+
+def test_partial_response_does_not_cache_ambiguous_or_untrusted_ids():
+    batch = [{'id': 'x', 'text': 'Source text', 'already_chinese': False}]
+    item = {'id': 'x', 'text': '这是中文。', 'summary_index': None}
+    assert alignment._valid_partial({'captions': [item, item]}, batch, []) == {}
+    assert alignment._valid_partial({'captions': [item, {**item, 'id': 'unknown'}]}, batch, []) == {}
+    assert alignment._valid_partial({'captions': [{**item, 'start': 999}]}, batch, []) == {}
+
+
+@pytest.mark.parametrize('caption', ['The original English sentence.', 'OpenAI and 中文内容', '日本語の字幕'])
+def test_foreign_captions_do_not_block_tour_or_trigger_retry(caption):
+    calls = []
+    def foreign(batch, *args):
+        calls.append(batch)
+        return {'captions': [{'id': c['id'], 'text': caption, 'summary_index': None} for c in batch]}
+    result = alignment.enrich(manifest(), [{'start': 10, 'end': 20, 'text': 'The original English sentence.'}],
+                              {}, {}, requester=foreign)
+    assert len(calls) == 1
+    assert result['slides'][0]['captions'][0]['text'] == caption
+    assert result['subtitle_language'] == 'mixed'
+    assert alignment.aligned(result)
