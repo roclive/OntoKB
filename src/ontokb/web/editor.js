@@ -111,7 +111,7 @@
       const name=field(form,row.type==='Claim'?'论断内容':'实体名称','ke-name','input',row.name);name.required=true;name.maxLength=500;name.className='ke-name';name.type='text';name.title='最多 500 个字符';name.addEventListener('input',()=>name.setCustomValidity(/[\r\n]/.test(name.value)?'名称或论断内容不能包含换行。':''));
       const type=field(form,'实体类型','ke-type','select');selectOptions(type,data.types.map(t=>({value:typeof t==='string'?t:t.name,label:typeLabel(typeof t==='string'?t:t.name)})),row.type);
       field(form,'别名','ke-aliases','textarea',(row.aliases||[]).join('\n'),'每行一个别名。同一别名可属于多个记录，搜索时会显示候选；统一实体请使用合并。');
-      if(!isDocument(row)){const entry=el('div','ke-merge-entry');entry.append(el('div','','发现多个名称实际指向同一实体？'));const button=el('button','','合并到已有实体 →');button.type='button';button.onclick=()=>guard(()=>showMerge(row.id));entry.append(button);form.append(entry);}
+      if(!isDocument(row)){const entry=el('div','ke-merge-entry');entry.append(el('div','','发现多个名称实际指向同一实体？'));const button=el('button','','合并到已有实体 →');button.type='button';button.onclick=()=>beginMerge(row.id);entry.append(button);form.append(entry);}
       const reviewWrap=el('div');form.append(reviewWrap);
       function reviewField(){reviewWrap.replaceChildren();if(type.value==='Claim'){const review=field(reviewWrap,'核实状态','ke-review','select');selectOptions(review,(data.review_statuses||['unverified','verified','disputed','refuted']).map(s=>({value:typeof s==='string'?s:s.value||s.name,label:statusLabels[typeof s==='string'?s:s.value||s.name]||s.label||s})),row.verificationStatus||'unverified');}}
       reviewField();type.addEventListener('change',()=>{reviewField();track();});
@@ -244,16 +244,31 @@
     const actions=el('div','ke-merge-actions'),swap=el('button','','交换保留方向'),preview=el('button','primary','预览合并结果');swap.type=preview.type='button';preview.id='ke-merge-preview';swap.onclick=()=>{if(busy)return;[mergeSession.sourceId,mergeSession.targetId]=[mergeSession.targetId,mergeSession.sourceId];invalidateMerge();renderMergeSelections();};preview.onclick=previewMerge;actions.append(swap,preview);workspace.append(actions);
     const message=el('p','ke-merge-message','选择完成后，先预览合并结果。');message.id='ke-merge-message';message.setAttribute('role','status');workspace.append(message);const result=el('section','ke-merge-result');result.id='ke-merge-result';workspace.append(result);content.append(workspace);renderMergeSelections();renderList();content.scrollTop=0;byId('ke-merge-'+(sourceId?'target':'source')+'-search').focus();
   }
+  function renamedMergeTarget(){
+    if(!selected||kind==='triples'||isDocument(selected))return null;
+    const normalize=name=>String(name||'').normalize('NFKC').trim().replace(/\s+/g,' ').toLocaleLowerCase();
+    const attempted=normalize(values().name);
+    return data.entities.find(row=>String(row.id)!==String(selected.id)&&!isDocument(row)&&normalize(row.name)===attempted)||null;
+  }
+  function beginMerge(sourceId,targetId){
+    if(busy||!data)return;
+    const owner=renamedMergeTarget();targetId=targetId??owner?.id;
+    const draft=values(),saved=baseline?JSON.parse(baseline):{};
+    // A conflicting rename selects the merge destination; it is not a separate edit to discard.
+    const renameOnly=selected&&String(selected.id)===String(sourceId)&&owner&&String(owner.id)===String(targetId)&&JSON.stringify({...draft,name:saved.name})===JSON.stringify(saved);
+    const openPreview=()=>{showMerge(sourceId,targetId);if(sourceId&&targetId)previewMerge();};
+    if(renameOnly&&!memoryDirty)openPreview();else guard(openPreview);
+  }
   function aliasConflictAction(){
-    const normalize=name=>String(name).normalize('NFKC').trim().toLocaleLowerCase();const attempted=normalize(values().name);const owner=data.entities.find(row=>String(row.id)!==String(selected?.id)&&normalize(row.name)===attempted);
-    if(owner&&selected&&!isDocument(selected)&&!isDocument(owner)){const sourceId=selected.id;const action=el('button','','查看并合并「'+owner.name+'」');action.type='button';action.onclick=()=>guard(()=>showMerge(sourceId,owner.id));byId('ke-feedback').append(action);}
+    const owner=renamedMergeTarget();
+    if(owner){const sourceId=selected.id;const action=el('button','','查看并合并「'+owner.name+'」');action.type='button';action.onclick=()=>beginMerge(sourceId,owner.id);byId('ke-feedback').append(action);}
   }
   function empty(){leaveMerge();selected=null;dirty=false;memoryDirty=false;byId('ke-delete').hidden=true;byId('ke-content').replaceChildren();const n=el('div','ke-empty');n.append(el('strong','','把知识整理得更清晰。'),el('p','','从左侧选择实体、论断或关系。知识修改可以撤销，个人记忆设置自动保存并记录变化。'));byId('ke-content').append(n);syncButtons();}
   async function open(target){if(dialog.open){guard(()=>resolveTarget(target));return;}lastFocus=document.activeElement;stopTour();dialog.showModal();feedback('正在读取知识库…');empty();try{await reload();renderList();feedback('');resolveTarget(target);byId('ke-search').focus();}catch(error){feedback('无法连接知识库：'+error.message+' 请确认本地 API 服务已启动。',true);}}
   function resolveTarget(target){if(!data)return;if(target?.entity||target?.relation){category="";article="";renderArticleFilters();}if(target?.entity){const row=data.entities.find(e=>e.name===target.entity||String(e.id)===String(target.entity));if(row){kind=row.type==='Claim'?'claims':'entities';updateTabs();byId('ke-search').value='';select(row);return;}}if(target?.relation){const r=target.relation;const row=data.triples.find(t=>r.id != null ? String(r.id)===String(t.id) : entityName(t.subject_id)===(r.s||r.subject)&&entityName(t.object_id)===(r.t||r.object)&&t.predicate===(r.predicate||r.p)&&(!r.source||r.source===t.source));if(row){kind='triples';updateTabs();byId('ke-search').value='';select(row);return;}}renderList();}
   function close(){dialog.close();lastFocus?.focus();}
   byId('ke-history').onclick=()=>guard(()=>{if(data)showHistory();});
-  byId('ke-merge-open').onclick=()=>guard(()=>{if(data)showMerge(kind!=='triples'&&!isDocument(selected)?selected?.id:null);});
+  byId('ke-merge-open').onclick=()=>beginMerge(kind!=='triples'&&!isDocument(selected)?selected?.id:null);
   byId('ke-close').onclick=()=>guard(close);dialog.addEventListener('cancel',e=>{e.preventDefault();guard(close);});
   byId('ke-search').addEventListener('input',()=>{if(data)renderList();});
   for(const id of ['ke-category','ke-article'])byId(id).addEventListener('change',()=>{
